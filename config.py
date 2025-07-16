@@ -1,24 +1,29 @@
 import os
 
 class Config:
-    # Clé secrète pour Flask. À changer pour la production !
-    SECRET_KEY = os.environ.get('SECRET_KEY') or 'une_cle_secrete_tres_complexe_et_aleatoire_pour_dev'
+    # Récupère la clé secrète depuis les variables d'environnement (chargées par python-dotenv)
+    SECRET_KEY = os.environ.get('SECRET_KEY') or 'default_fallback_secret_key_if_env_not_set'
 
-    # Configuration de la base de données PostgreSQL
-    SQLALCHEMY_DATABASE_URI = 'postgresql://nambadmin:qwan2025admin@localhost:5432/Projet_Test'
+    # Construction de l'URI de la base de données PostgreSQL à partir des variables d'environnement
+    DB_USER = os.environ.get('DB_USER')
+    DB_PASSWORD = os.environ.get('DB_PASSWORD')
+    DB_HOST = os.environ.get('DB_HOST', 'localhost') # Valeur par défaut 'localhost'
+    DB_PORT = os.environ.get('DB_PORT', '5432')     # Valeur par défaut '5432'
+    DB_NAME = os.environ.get('DB_NAME')
+
+    SQLALCHEMY_DATABASE_URI = (
+        f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+    )
     SQLALCHEMY_TRACK_MODIFICATIONS = False
 
-    # Configuration pour l'API locale du LLM de chat (DeepSeek Coder via Jan.ai)
+    # Récupère la clé API de Jan.ai depuis les variables d'environnement
     JAN_AI_API_BASE = "http://localhost:1337/v1"
-    JAN_AI_API_KEY = "my-jan-secret-key"
+    JAN_AI_API_KEY = os.environ.get('JAN_AI_API_KEY')
 
-    # Configuration pour l'API locale du modèle d'embeddings (Nomic Embed Text via LM Studio)
-    # ASSUREZ-VOUS QUE LA 2ÈME INSTANCE LM STUDIO TOURNE SUR LE PORT 1234
+    # Récupère la clé API de LM Studio depuis les variables d'environnement
     LMSTUDIO_EMBEDDING_API_BASE = "http://localhost:1234/v1"
-    LMSTUDIO_API_KEY = "lm-studio" # <--- ASSUREZ-VOUS QUE CETTE LIGNE EST PRÉSENTE ET CORRECTE !
+    LMSTUDIO_API_KEY = os.environ.get('LMSTUDIO_API_KEY')
 
-    # Chemin vers le dossier des documents pour le RAG
+    # Chemins vers les dossiers RAG (non sensibles, peuvent rester ici ou aussi dans .env)
     KNOWLEDGE_BASE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'kb_documents')
-
-    # Nom du dossier pour le Vector Store (ChromaDB)
     CHROMA_PERSIST_DIRECTORY = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'chroma_db')
