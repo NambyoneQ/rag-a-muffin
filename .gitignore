@@ -1,0 +1,29 @@
+# Environnement virtuel Python
+venv/
+.env/
+
+# Fichiers de cache Python
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+
+# Dossiers de données LM Studio / ChromaDB
+#lm_studio_cache/
+#models/
+chroma_db/ # Très important pour ne pas versionner les embeddings générés
+
+# Fichiers spécifiques au système d'exploitation
+.DS_Store
+Thumbs.db
+
+# Fichiers logs et autres sorties
+*.log
+*.sqlite3 # Si vous utilisiez SQLite
+*.db # Pour les fichiers de base de données (si non PostgreSQL externe)
+/instance/
+
+# Fichiers de configuration sensibles (à ne pas versionner directement)
+.flaskenv
+.env
+# config.py # Si contient des clés API, etc., mieux vaut le garder hors Git ou utiliser des .env

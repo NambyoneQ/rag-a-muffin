@@ -1,8 +1,7 @@
 import os
 from flask import Flask, render_template, request, jsonify
 from flask_sqlalchemy import SQLAlchemy
-from langchain_openai import ChatOpenAI
-from langchain_core.embeddings import Embeddings
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_core.prompts import ChatPromptTemplate
 from langchain.chains.retrieval import create_retrieval_chain
 from langchain.chains.combine_documents import create_stuff_documents_chain
@@ -13,11 +12,13 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.memory import ConversationBufferMemory
 from langchain_core.messages import HumanMessage, AIMessage, BaseMessage
 from typing import List
-import requests
 import logging
 import json
 import re
 import urllib.parse
+from langchain_core.embeddings import Embeddings # Pour la classe de base Embeddings
+from typing import List # Pour les annotations de type (List)
+import requests # Pour les requêtes HTTP directes (utilisé par LMStudioCustomEmbeddings)
 
 from dotenv import load_dotenv
 
@@ -94,12 +95,12 @@ class LMStudioCustomEmbeddings(Embeddings):
         url = f"{self.base_url}/embeddings"
         payload = {
             "input": texts,
-            "model": "nomic-embed-text" # Nom du modèle d'embeddings chargé dans LM Studio
+            "model": "text-embedding-nomic-embed-text-v1.5@f32" # <-- NOM EXACT DU MODÈLE ICI
         }
         
         try:
             response = requests.post(url, headers=self.headers, json=payload, timeout=60)
-            response.raise_for_status() # Lève une exception si la requête HTTP renvoie un code d'erreur (4xx ou 5xx)
+            response.raise_for_status() 
             
             data = response.json()
             if "data" in data and len(data["data"]) > 0:
@@ -117,7 +118,6 @@ class LMStudioCustomEmbeddings(Embeddings):
 
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
         # Méthode requise par LangChain pour l'embedding de multiples documents
-        # Envoie les documents par lots à l'API pour optimiser la performance et éviter les timeouts
         batch_size = 32
         all_embeddings = []
         for i in range(0, len(texts), batch_size):
@@ -129,20 +129,20 @@ class LMStudioCustomEmbeddings(Embeddings):
         # Méthode requise par LangChain pour l'embedding d'une seule requête/question
         return self._embed([text])[0]
 
+
 # --- Configuration et initialisation du LLM (chat) et du Modèle d'Embeddings (RAG) ---
 
-# LLM principal pour le chat (Llama 3 via Jan.ai sur port 1337)
+# LLM principal pour le chat (Llama 3 via LM Studio sur port 1234)
 chat_llm = ChatOpenAI(
-    base_url=app.config['JAN_AI_API_BASE'],
-    api_key=app.config['JAN_AI_API_KEY'],
-    model="Llama-3.1-8B-UltraLong-4M-Instruct-Q4_K_M", # Nom exact du modèle Llama 3 chargé dans Jan.ai
-    temperature=0.4, # Température modérée pour un équilibre entre créativité et précision
-    # Le streaming est désactivé implicitement si 'streaming=True' n'est pas spécifié
+    base_url=app.config['LMSTUDIO_UNIFIED_API_BASE'], # Utilise l'API unifiée de LM Studio
+    api_key=app.config['LMSTUDIO_API_KEY'], # La même clé API
+    model="Llama-3.1-8B-UltraLong-4M-Instruct-Q4_K_M", # Nom exact du modèle de chat chargé dans LM Studio
+    temperature=0.4,
 )
 
 # Modèle d'Embeddings (Nomic Embed Text via LM Studio sur port 1234)
 embeddings_llm = LMStudioCustomEmbeddings(
-    base_url=app.config['LMSTUDIO_EMBEDDING_API_BASE'],
+    base_url=app.config['LMSTUDIO_UNIFIED_API_BASE'],
     api_key=app.config['LMSTUDIO_API_KEY']
 )
 
