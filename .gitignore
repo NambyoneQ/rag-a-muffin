@@ -1,0 +1,26 @@
+# Fichiers et dossiers générés par Python et l'environnement
+venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+
+# Données du Vector Store ChromaDB (doivent être ignorées)
+chroma_db/
+
+# Fichiers de configuration sensibles (doivent être ignorés)
+.env
+.flaskenv
+
+# Logs et autres fichiers de sortie
+*.log
+*.sqlite3
+*.db
+/instance/
+
+# Fichiers spécifiques au système d'exploitation
+.DS_Store
+Thumbs.db
+
+# IDE files (optional, but good practice)
+.vscode/
