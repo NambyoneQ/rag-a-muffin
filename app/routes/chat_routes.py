@@ -1,9 +1,6 @@
 from flask import render_template, request, jsonify
 from app import app, db
-from app.services.llm_service import get_chat_llm # Importe la fonction pour obtenir le LLM de chat
-# Importe les fonctions pour obtenir le vectorstore et le retriever
-from app.services.rag_service import get_vectorstore, get_retriever 
-from app.services.conversation_service import load_conversation_history, save_message
+from app.services.conversation_service import load_conversation_history
 
 from langchain.memory import ConversationBufferMemory
 from langchain_core.messages import HumanMessage, AIMessage, BaseMessage
@@ -16,10 +13,15 @@ rag_prompt = None
 document_chain = None
 general_llm_chain = None
 
+# Cette variable globale est utilisée pour suivre l'ID de la conversation active.
 current_conversation_id = None
 
+# Fonction pour initialiser les chaînes LangChain et les prompts
 def initialize_chains():
     global rag_prompt, document_chain, general_llm_chain
+
+    # Imports locaux pour cette fonction d'initialisation
+    from app.services.llm_service import get_chat_llm
 
     chat_llm_instance = get_chat_llm()
     if chat_llm_instance is None:
@@ -44,21 +46,24 @@ def initialize_chains():
 
     app.logger.info("Chaînes LangChain (document_chain, general_llm_chain) initialisées.")
 
+
+# Route pour la page d'accueil de l'application
 @app.route('/')
 def index():
-    from app.models import Conversation 
+    from app.models import Conversation
     conversations = Conversation.query.order_by(Conversation.timestamp.desc()).all()
     return render_template('index.html', conversations=conversations)
 
+# Route principale pour le traitement des messages du chat
 @app.route('/chat', methods=['POST'])
 def chat():
-    global current_conversation_id 
+    global current_conversation_id
     user_message = request.json.get('message')
     conv_id_from_request = request.json.get('conversation_id')
     ephemeral_history_from_frontend = request.json.get('ephemeral_history', []) # type: ignore [reportOptionalMemberAccess]
 
     if conv_id_from_request == "new_ephemeral":
-        current_conversation_id = None 
+        current_conversation_id = None
     elif conv_id_from_request:
         current_conversation_id = int(conv_id_from_request)
 
@@ -66,23 +71,26 @@ def chat():
         return jsonify({'response': 'Aucun message fourni.'}), 400
 
     try:
-        response_content = "" 
+        response_content = ""
 
         chat_history_list = []
         if current_conversation_id:
             chat_history_list = load_conversation_history(current_conversation_id)
         else:
             for msg in ephemeral_history_from_frontend:
-                sender = msg.get('sender') if isinstance(msg, dict) and msg.get('sender') is not None else None # type: ignore [reportOptionalMemberAccess]
-                content = msg.get('content') if isinstance(msg, dict) and msg.get('content') is not None else None # type: ignore [reportOptionalMemberAccess]
+                sender = msg.get('sender') if isinstance(msg, dict) and 'sender' in msg and msg['sender'] is not None else None # type: ignore [reportOptionalMemberAccess]
+                content = msg.get('content') if isinstance(msg, dict) and 'content' in msg and msg['content'] is not None else None # type: ignore [reportOptionalMemberAccess]
                 if sender == 'user' and content is not None:
                     chat_history_list.append(HumanMessage(content=content))
                 elif sender == 'bot' and content is not None:
                     chat_history_list.append(AIMessage(content=content))
 
-        chat_llm_instance_for_memory = get_chat_llm() # Utilise le getter pour la mémoire
+        # Accéder directement au chat_llm depuis app.extensions
+        chat_llm_instance_for_memory = app.extensions["llm_service"]["chat_llm"] # type: ignore [reportOptionalSubscript]
         if chat_llm_instance_for_memory is None:
-            raise RuntimeError("Chat LLM n'est pas initialisé pour la mémoire. Vérifiez le démarrage de l'app.")
+            # Cela ne devrait pas arriver si initialize_llms se passe bien
+            app.logger.error("Chat LLM non disponible dans app.extensions.")
+            return jsonify({'response': "Erreur interne: Chat LLM non disponible."}), 500
 
         temp_memory = ConversationBufferMemory(
             llm=chat_llm_instance_for_memory, # type: ignore [reportCallIssue]
@@ -91,28 +99,28 @@ def chat():
         )
         temp_memory.chat_memory.messages = chat_history_list
 
-        # Obtient les instances de vectorstore et retriever via les fonctions getter
-        current_vectorstore = get_vectorstore()
-        current_retriever = get_retriever()
+        # Accéder directement aux instances RAG depuis app.extensions
+        current_vectorstore = app.extensions["rag_service"]["vectorstore"] # type: ignore [reportOptionalSubscript]
+        current_retriever = app.extensions["rag_service"]["retriever"]     # type: ignore [reportOptionalSubscript]
 
-        if current_vectorstore and current_retriever: # Vérifie si les instances sont valides
+        if current_vectorstore and current_retriever:
             app.logger.info(f"DEBUG RAG: Question utilisateur: '{user_message}'")
             print(f"PRINT DEBUG RAG: Question utilisateur: '{user_message}'")
 
-            retrieved_docs = current_retriever.invoke(user_message) # Utilise l'instance obtenue
+            retrieved_docs = current_retriever.invoke(user_message)
 
             app.logger.info(f"DEBUG RAG: Nombre de documents récupérés: {len(retrieved_docs)}")
             print(f"PRINT DEBUG RAG: Nombre de documents récupérés: {len(retrieved_docs)}")
 
             for i, doc in enumerate(retrieved_docs):
-                source_info = doc.metadata.get('source', 'N/A') if doc.metadata is not None else 'N/A' # type: ignore [reportOptionalMemberAccess]
+                source_info = doc.metadata.get('source', 'N/A') if isinstance(doc.metadata, dict) else 'N/A'
                 app.logger.info(f"  Doc {i+1} (Source: {source_info}): '{doc.page_content[:300]}...'")
                 print(f"PRINT DEBUG RAG:   Doc {i+1} (Source: {source_info}): '{doc.page_content[:300]}...'")
 
             if len(retrieved_docs) > 0:
                 print("PRINT DEBUG RAG: Documents pertinents trouvés. Utilisation du RAG.")
                 app.logger.info("DEBUG RAG: Utilisation du RAG.")
-                rag_chain = create_retrieval_chain(current_retriever, document_chain) # Utilise l'instance obtenue
+                rag_chain = create_retrieval_chain(current_retriever, document_chain) # type: ignore [reportArgumentTypeIssue]
 
                 response_langchain = rag_chain.invoke({
                     "input": user_message,
@@ -124,22 +132,24 @@ def chat():
                 print("PRINT DEBUG RAG: Aucun document pertinent trouvé. Basculement sur les connaissances générales du LLM.")
                 app.logger.info("DEBUG RAG: Basculement sur les connaissances générales du LLM.")
 
-                response_langchain = general_llm_chain.invoke({ # general_llm_chain est global
+                response_langchain = general_llm_chain.invoke({ # type: ignore [reportCallIssue, reportOptionalMemberAccess]
                     "input": user_message,
                     "chat_history": temp_memory.load_memory_variables({})["chat_history"]
                 })
-                response_content = response_langchain["content"] # type: ignore [reportAttributeAccessIssue]
+                response_content = response_langchain.content # type: ignore [reportAttributeAccessIssue]
 
         else: # Ce bloc s'exécute si le RAG n'est pas initialisé (vectorstore ou retriever sont None)
             app.logger.info("INFO: RAG non actif ou initialisation échouée. Utilisation du LLM général par default.")
             print("PRINT DEBUG RAG: RAG inactif. Utilisation du LLM général par default.")
 
-            response_langchain = general_llm_chain.invoke({ # general_llm_chain est global
+            response_langchain = general_llm_chain.invoke({ # type: ignore [reportCallIssue, reportOptionalMemberAccess]
                 "input": user_message,
                 "chat_history": temp_memory.load_memory_variables({})["chat_history"]
             })
-            response_content = response_langchain["content"] # type: ignore [reportAttributeAccessIssue]
+            response_content = response_langchain.content # type: ignore [reportAttributeAccessIssue]
 
+        # Importe save_message ici (localement)
+        from app.services.conversation_service import save_message
         if current_conversation_id:
             save_message(current_conversation_id, "user", user_message) # type: ignore [reportCallIssue]
             save_message(current_conversation_id, "bot", response_content) # type: ignore [reportCallIssue]
@@ -150,3 +160,54 @@ def chat():
         app.logger.error(f"Erreur lors du traitement du chat: {e}")
         print(f"PRINT ERROR: Erreur lors du traitement du chat: {e}")
         return jsonify({'response': f"Désolé, une erreur est survenue lors de la communication avec l'IA ou la base de données. Détails : {str(e)}."}), 500
+
+# Récupère et renvoie la liste de toutes les conversations persistantes
+@app.route('/conversations', methods=['GET'])
+def get_conversations():
+    from app.models import Conversation
+    conversations = Conversation.query.order_by(Conversation.timestamp.desc()).all()
+    return jsonify([{'id': conv.id, 'name': conv.name} for conv in conversations])
+
+# Récupère et renvoie les messages d'une conversation spécifique
+@app.route('/conversations/<int:conv_id>', methods=['GET'])
+def get_conversation_messages(conv_id):
+    from app.models import Message
+    messages = Message.query.filter_by(conversation_id=conv_id).order_by(Message.timestamp).all()
+    return jsonify([{'sender': msg.sender, 'content': msg.content} for msg in messages])
+
+# Crée une nouvelle conversation persistante
+@app.route('/conversations', methods=['POST'])
+def create_conversation():
+    from app.models import Conversation
+    data = request.json
+    name = data.get('name')
+    if not name:
+        return jsonify({'error': 'Le nom de la conversation est requis.'}), 400
+
+    existing_conversations_count = Conversation.query.count()
+    if existing_conversations_count >= 3:
+        return jsonify({'error': 'Vous ne pouvez pas créer plus de 3 conversations persistantes.'}), 400
+
+    new_conv = Conversation(name=name) # type: ignore [reportCallIssue]
+    try:
+        db.session.add(new_conv)
+        db.session.commit()
+        return jsonify({'id': new_conv.id, 'name': new_conv.name}), 201
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': f'Erreur lors de la création de la conversation: {e}'}), 500
+
+# Supprime une conversation persistante et tous ses messages associés
+@app.route('/conversations/<int:conv_id>', methods=['DELETE'])
+def delete_conversation(conv_id):
+    from app.models import Conversation
+    conv = Conversation.query.get(conv_id)
+    if not conv:
+        return jsonify({'error': 'Conversation non trouvée.'}), 404
+    try:
+        db.session.delete(conv)
+        db.session.commit()
+        return jsonify({'status': 'success', 'message': 'Conversation supprimée.'}), 200
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': f'Erreur lors de la suppression de la conversation: {e}'}), 500

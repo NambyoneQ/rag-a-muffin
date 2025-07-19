@@ -26,10 +26,12 @@ class Message(db.Model):
         return f'<Message {self.id} (Conv:{self.conversation_id}): {self.content}>'
 
 # Modèle pour stocker l'état et les métadonnées des documents indexés (pour l'update incrémentale du RAG)
+
 class DocumentStatus(db.Model):
     id = Column(Integer, primary_key=True)
     file_path = Column(String(500), unique=True, nullable=False) # Chemin absolu du fichier
-    last_modified = Column(DateTime, nullable=False) # Date de dernière modification du fichier sur le disque
+    # Utilise un type DateTime directement pour la date de dernière modification
+    last_modified = Column(DateTime, nullable=False) 
     indexed_at = Column(DateTime, default=db.func.now()) # Date d'indexation dans ChromaDB
 
     def __repr__(self):

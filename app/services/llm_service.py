@@ -1,11 +1,12 @@
-from flask import current_app # Importe current_app pour accéder à la config Flask
+import os
+from flask import current_app
 from langchain_openai import ChatOpenAI
 from langchain_core.embeddings import Embeddings
 from typing import List
 import requests
 import logging
 
-# Variables globales pour les LLMs (initialisées à None, car elles seront remplies par initialize_llms)
+# Variables globales pour les instances de LLMs (initialisées à None, car elles seront remplies par initialize_llms)
 _chat_llm_instance = None
 _embeddings_llm_instance = None
 
@@ -62,7 +63,7 @@ class LMStudioCustomEmbeddings(Embeddings):
     def embed_query(self, text: str) -> List[float]:
         return self._embed([text])[0]
 
-# --- Fonction pour initialiser les instances de LLM (appelée une seule fois) ---
+# --- Fonction pour initialiser les instances de LLM (appelée une seule fois au démarrage) ---
 def initialize_llms():
     global _chat_llm_instance, _embeddings_llm_instance
 
@@ -80,9 +81,9 @@ def initialize_llms():
     current_app.logger.info("LLMs (chat_llm et embeddings_llm) initialisés.")
 
 # --- Fonctions pour accéder aux instances de LLM après leur initialisation ---
+# Ces fonctions sont utilisées par d'autres modules pour obtenir les instances de LLM.
 def get_chat_llm():
     if _chat_llm_instance is None:
-        # Ceci ne devrait pas se produire si initialize_llms() est appelée correctement
         raise RuntimeError("Chat LLM n'a pas été initialisé. Appelez initialize_llms() au démarrage de l'application.")
     return _chat_llm_instance
 
