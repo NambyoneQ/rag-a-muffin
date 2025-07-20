@@ -1,0 +1,98 @@
+/* app/static/css/style.css */
+
+/* Styles généraux pour le corps de la page et la mise en page Flexbox */
+body {
+    font-family: Arial, sans-serif;
+    margin: 0;
+    padding: 0;
+    background-color: #f4f4f4;
+    display: flex; /* Utilise Flexbox pour organiser la barre latérale et le contenu principal */
+    height: 100vh; /* S'assure que le corps prend toute la hauteur de la fenêtre du navigateur */
+    overflow: hidden; /* Empêche le défilement global du body, car le défilement sera géré par les sous-conteneurs */
+}
+
+/* Styles pour la barre latérale gauche (menu des conversations) */
+#sidebar {
+    width: 250px; /* Largeur fixe de la barre latérale */
+    min-width: 200px; /* Largeur minimale si la fenêtre est redimensionnée */
+    background-color: #333; /* Fond sombre */
+    color: white; /* Texte blanc */
+    padding: 20px;
+    box-sizing: border-box; /* Inclut le padding dans la largeur */
+    height: 100%; /* Occupe toute la hauteur disponible */
+    overflow-y: auto; /* Permet le défilement vertical si le contenu du menu est long */
+    flex-shrink: 0; /* Empêche la barre latérale de se rétrécir lorsque le contenu principal a besoin de plus d'espace */
+}
+#sidebar h2 { margin-top: 0; color: #4CAF50; } /* Titre du menu */
+#conversation-menu ul { list-style: none; padding: 0; } /* Liste des conversations */
+#conversation-menu li { margin-bottom: 10px; }
+#conversation-menu button {
+    width: 100%; padding: 10px; background-color: #555; color: white; border: none; border-radius: 5px;
+    cursor: pointer; text-align: left; font-size: 1em; display: flex; justify-content: space-between; align-items: center;
+}
+#conversation-menu button:hover { background-color: #777; } /* Effet au survol */
+#conversation-menu button.active { background-color: #4CAF50; } /* Bouton de conversation active */
+.delete-btn { /* Bouton de suppression d'une conversation */
+    background-color: #f44336; color: white; border: none; border-radius: 3px; cursor: pointer;
+    font-size: 0.8em; padding: 3px 6px; margin-left: 10px;
+}
+.delete-btn:hover { background-color: #d32f2f; }
+#new-conv-btn, #ephemeral-conv-btn { /* Boutons "Nouvelle" et "Éphémère" */
+    background-color: #007bff; margin-top: 15px;
+}
+#new-conv-btn:hover, #ephemeral-conv-btn:hover { background-color: #0056b3; }
+
+/* Styles pour le contenu principal (zone de chat et zone de saisie) */
+#main-content {
+    flex-grow: 1; /* Occupe tout l'espace horizontal restant */
+    display: flex; /* Utilise Flexbox pour organiser les éléments verticalement */
+    flex-direction: column;
+    height: 100%; /* Occupe toute la hauteur disponible */
+}
+#chat-box {
+    flex-grow: 1; /* La boîte de chat prend tout l'espace vertical disponible */
+    padding: 20px;
+    overflow-y: auto; /* Permet le défilement vertical du contenu du chat */
+    background-color: #fff;
+    border-bottom: 1px solid #ddd;
+}
+/* Styles pour les messages individuels dans le chat */
+.message { margin-bottom: 15px; padding: 10px; border-radius: 8px; max-width: 80%; }
+.user-message { /* Messages de l'utilisateur */
+    background-color: #e1ffc7; align-self: flex-end; margin-left: auto; /* Aligné à droite */
+}
+.bot-message { /* Messages du bot */
+    background-color: #f1f0f0; align-self: flex-start; /* Aligné à gauche */
+}
+
+/* Styles pour la zone de saisie du message */
+#input-area { display: flex; padding: 20px; background-color: #eee; border-top: 1px solid #ddd; flex-wrap: wrap;}
+#user-input { flex-grow: 1; padding: 10px; border: 1px solid #ccc; border-radius: 5px; margin-right: 10px; min-width: 200px;}
+#send-button { padding: 10px 20px; background-color: #4CAF50; color: white; border: none; border-radius: 5px; cursor: pointer; }
+#send-button:hover { background-color: #45a049; }
+#loading-indicator { display: none; text-align: center; padding: 10px; color: #888; } /* Indicateur de chargement */
+
+/* NOUVEAUX STYLES POUR LE MODE RAG */
+#rag-mode-selection {
+    width: 100%;
+    margin-bottom: 15px;
+    color: #333; /* Texte plus sombre pour le mode RAG */
+    display: flex;
+    align-items: center;
+    justify-content: flex-start; /* Aligner à gauche */
+    gap: 15px; /* Espacement entre les radios */
+    background-color: #e0e0e0;
+    padding: 10px;
+    border-radius: 5px;
+}
+#rag-mode-selection label {
+    margin-right: 5px;
+    font-weight: bold;
+}
+#rag-mode-selection input[type="radio"] {
+    margin-right: 5px;
+}
+#rag-mode-selection span {
+    font-weight: normal; /* Pour le texte descriptif des options */
+    color: #555;
+}

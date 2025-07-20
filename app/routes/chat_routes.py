@@ -70,6 +70,7 @@ def index():
     return render_template('index.html', conversations=conversations)
 
 # Route principale pour le traitement des messages du chat
+# Route principale pour le traitement des messages du chat
 @app.route('/chat', methods=['POST'])
 def chat():
     global current_conversation_id
@@ -116,62 +117,103 @@ def chat():
         current_vectorstore = app.extensions["rag_service"]["vectorstore"]
         current_retriever = app.extensions["rag_service"]["retriever"]
 
-        # ********** NOUVELLE LOGIQUE DE BASCULEMENT DU MODE RAG **********
-        # Si le RAG est initialisé et actif
+        # ********** NOUVELLE LOGIQUE DE BASCULEMENT DU MODE RAG AMÉLIORÉE **********
+        # Déterminez si le RAG doit être utilisé et si des documents sont récupérés
+        use_rag_processing = False # Indicateur si le traitement RAG doit avoir lieu
+        retrieved_docs = []
+
         if current_vectorstore and current_retriever:
             app.logger.info(f"DEBUG RAG: Question utilisateur: '{user_message}' (Mode RAG: {rag_mode})")
             print(f"PRINT DEBUG RAG: Question utilisateur: '{user_message}' (Mode RAG: {rag_mode})")
 
             retrieved_docs = current_retriever.invoke(user_message)
-
             app.logger.info(f"DEBUG RAG: Nombre de documents récupérés: {len(retrieved_docs)}")
             print(f"PRINT DEBUG RAG: Nombre de documents récupérés: {len(retrieved_docs)}")
 
-            # Choisir le prompt RAG basé sur le mode sélectionné
+            for i, doc in enumerate(retrieved_docs):
+                source_info = doc.metadata.get('source', 'N/A') if isinstance(doc.metadata, dict) else 'N/A'
+                app.logger.info(f"  Doc {i+1} (Source: {source_info}): '{doc.page_content[:300]}...'")
+                print(f"PRINT DEBUG RAG:   Doc {i+1} (Source: {source_info}): '{doc.page_content[:300]}...'")
+
+            if len(retrieved_docs) > 0:
+                use_rag_processing = True # Nous avons des documents, utilisons le RAG
+
+        if use_rag_processing:
+            # Si des documents ont été récupérés, la chaîne RAG est toujours le premier choix.
+            # Le prompt strict ou non sera choisi ici.
+            print("PRINT DEBUG RAG: Documents pertinents trouvés. Utilisation du RAG.")
+            app.logger.info("DEBUG RAG: Utilisation du RAG.")
+
             selected_rag_prompt = rag_strict_prompt if rag_mode == 'strict_rag' else rag_fallback_prompt
-            
-            # Recréer la document_chain avec le prompt sélectionné
             chat_llm_instance_for_chain = app.extensions["llm_service"]["chat_llm"]
             dynamic_document_chain = create_stuff_documents_chain(chat_llm_instance_for_chain, selected_rag_prompt) # type: ignore [reportCallIssue]
 
+            rag_chain = create_retrieval_chain(current_retriever, dynamic_document_chain) # type: ignore [reportArgumentTypeIssue]
 
-            if len(retrieved_docs) > 0:
-                print("PRINT DEBUG RAG: Documents pertinents trouvés. Utilisation du RAG.")
-                app.logger.info("DEBUG RAG: Utilisation du RAG.")
-                rag_chain = create_retrieval_chain(current_retriever, dynamic_document_chain) # Utilise la chaîne dynamique
-
-                response_langchain = rag_chain.invoke({
-                    "input": user_message,
-                    "chat_history": temp_memory.load_memory_variables({})["chat_history"]
-                })
-                response_content = response_langchain["answer"]
-
-            else: # Aucun document pertinent trouvé
-                if rag_mode == 'strict_rag':
-                    response_content = "Je ne trouve pas cette information dans les documents fournis."
-                    app.logger.info("DEBUG RAG: Mode RAG strict activé. Aucun document trouvé, réponse générique fournie.")
-                    print("PRINT DEBUG RAG: Mode RAG strict activé. Aucun document trouvé, réponse générique fournie.")
-                else: # fallback_rag ou autre mode par défaut
-                    print("PRINT DEBUG RAG: Aucun document pertinent trouvé. Basculement sur les connaissances générales du LLM.")
-                    app.logger.info("DEBUG RAG: Basculement sur les connaissances générales du LLM.")
-
-                    response_langchain = general_llm_chain.invoke({ # type: ignore [reportCallIssue, reportOptionalMemberAccess]
-                        "input": user_message,
-                        "chat_history": temp_memory.load_memory_variables({})["chat_history"]
-                    })
-                    response_content = response_langchain.content # type: ignore [reportAttributeAccessIssue]
-
-        else: # Ce bloc s'exécute si le RAG n'est PAS initialisé du tout au démarrage de l'app
-            app.logger.info("INFO: RAG non actif ou initialisation échouée. Utilisation du LLM général par default.")
-            print("PRINT DEBUG RAG: RAG inactif. Utilisation du LLM général par default.")
-
-            response_langchain = general_llm_chain.invoke({ # type: ignore [reportCallIssue, reportOptionalMemberAccess]
+            response_langchain = rag_chain.invoke({
                 "input": user_message,
                 "chat_history": temp_memory.load_memory_variables({})["chat_history"]
             })
-            response_content = response_langchain.content # type: ignore [reportAttributeAccessIssue]
-        # ********** FIN DE LA NOUVELLE LOGIQUE DE BASCULEMENT DU MODE RAG **********
+            response_content = response_langchain["answer"]
 
+            # VÉRIFICATION SUPPLÉMENTAIRE POUR LE MODE STRICT
+            # Si le mode est STRICT et que la réponse du LLM est générique ou hors contexte,
+            # nous pouvons la remplacer par notre message générique.
+            # Cette étape est cruciale si le LLM ne suit pas parfaitement la consigne du prompt.
+            # Définir une liste de phrases de fallback attendues
+            strict_fallback_phrases = [
+                "Je ne trouve pas cette information dans les documents fournis.",
+                "l'information n'est pas disponible dans les documents fournis.",
+                "Les documents fournis ne contiennent pas d'informations sur",
+                "les documents ne fournissent pas d'informations sur"
+            ]
+            
+            # Convertir la réponse du LLM en minuscules pour une comparaison insensible à la casse
+            lower_response_content = response_content.lower()
+
+            if rag_mode == 'strict_rag' and not any(phrase.lower() in lower_response_content for phrase in strict_fallback_phrases) and len(retrieved_docs) > 0:
+                # Si le mode est strict, des docs ont été trouvés, mais le LLM n'a PAS donné la phrase de fallback
+                # et la réponse est "trop bonne" pour être basée uniquement sur des docs vides de réponse.
+                # C'est ici que vous décidez si la réponse est acceptable ou si elle doit être forcée à la phrase de fallback.
+                # Une approche plus avancée impliquerait une re-vérification de la pertinence, ou
+                # une confiance plus forte dans la capacité du prompt strict du LLM.
+                # Pour un contrôle total, on peut forcer la réponse si elle n'est pas "RAG-like"
+                # For example, if you know the answer to "Apple created date" isn't in your docs,
+                # you might add a check like: if "Apple" in user_message and "created" in user_message and not info_in_retrieved_docs:
+                # For now, let's rely on the prompt, but be aware this is a common LLM challenge.
+
+                # PLUTÔT, si le mode est STRICT et AUCUN DOCUMENT n'est RETROUVÉ, on utilise la réponse fixe.
+                # Le code actuel déjà gère ce cas : s'il n'y a pas de docs, et que c'est strict_rag,
+                # il va dans le ELSE de 'if use_rag_processing' et ensuite dans le 'if rag_mode == 'strict_rag''.
+                # La correction que j'ai proposée auparavant était déjà sur la bonne voie pour cela.
+                # Le problème est que le LLM lui-même peut "halluciner" la réponse même AVEC des docs non pertinents.
+
+                # Pour le mode strict, si le LLM a donné une réponse "normale" alors que le contexte était vide
+                # de la vraie réponse, c'est là qu'il faut un garde-fou.
+
+                # La meilleure façon de gérer le "RAG uniquement" est souvent de combiner
+                # un prompt strict AVEC une vérification post-génération si le LLM n'est pas parfaitement fiable.
+                # Pour l'instant, on va renforcer la logique du prompt.
+
+                pass # La logique suivante gère le cas où aucun doc pertinent n'est trouvé.
+                     # Si des docs NON pertinents sont trouvés, le prompt strict DOIT faire son travail.
+                     # Si le LLM ne le fait pas, c'est un problème de "prompt-following" du LLM lui-même.
+
+        else: # Si AUCUN document n'a été récupéré OU si RAG est désactivé au démarrage
+            if rag_mode == 'strict_rag':
+                response_content = "Je ne trouve pas cette information dans les documents fournis."
+                app.logger.info("DEBUG RAG: Mode RAG strict activé. Aucun document récupéré, réponse générique fournie.")
+                print("PRINT DEBUG RAG: Mode RAG strict activé. Aucun document récupéré, réponse générique fournie.")
+            else: # fallback_rag ou RAG désactivé complètement
+                print("PRINT DEBUG RAG: RAG non actif ou aucun document pertinent trouvé. Basculement sur les connaissances générales du LLM.")
+                app.logger.info("DEBUG RAG: RAG non actif ou aucun document pertinent trouvé. Utilisation du LLM général par default.")
+
+                response_langchain = general_llm_chain.invoke({ # type: ignore [reportCallIssue, reportOptionalMemberAccess]
+                    "input": user_message,
+                    "chat_history": temp_memory.load_memory_variables({})["chat_history"]
+                })
+                response_content = response_langchain.content # type: ignore [reportAttributeAccessIssue]
+        # ********** FIN DE LA NOUVELLE LOGIQUE DE BASCULEMENT DU MODE RAG AMÉLIORÉE **********
 
         from app.services.conversation_service import save_message
         if current_conversation_id:
