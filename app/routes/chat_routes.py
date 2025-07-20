@@ -9,8 +9,10 @@ from langchain.chains.retrieval import create_retrieval_chain
 from langchain.chains.combine_documents import create_stuff_documents_chain
 
 # Variables globales pour les chaînes LangChain et prompts (initialisées par initialize_chains())
-rag_prompt = None
-document_chain = None
+# Nous aurons besoin de deux prompts RAG différents: un strict et un pour le fallback
+rag_strict_prompt = None
+rag_fallback_prompt = None # Renommé pour plus de clarté
+document_chain = None # Utilisera un des prompts RAG
 general_llm_chain = None
 
 # Cette variable globale est utilisée pour suivre l'ID de la conversation active.
@@ -18,18 +20,15 @@ current_conversation_id = None
 
 # Fonction pour initialiser les chaînes LangChain et les prompts
 def initialize_chains():
-    global rag_prompt, document_chain, general_llm_chain
+    global rag_strict_prompt, rag_fallback_prompt, document_chain, general_llm_chain
 
-    # Imports locaux pour cette fonction d'initialisation
     from app.services.llm_service import get_chat_llm
-
     chat_llm_instance = get_chat_llm()
     if chat_llm_instance is None:
         app.logger.error("Erreur: Le chat LLM n'est pas initialisé via get_chat_llm() dans initialize_chains.")
         raise RuntimeError("Chat LLM not initialized for chain creation.")
 
-    # Prompt pour le mode RAG STRICT (si utilisé)
-    # Ce prompt indique au LLM de ne PAS répondre si l'info n'est pas dans le contexte.
+    # 1. Prompt pour le mode "RAG uniquement" (strict)
     rag_strict_prompt = ChatPromptTemplate.from_messages([
         ("system", "En te basant STRICTEMENT et UNIQUEMENT sur le CONTEXTE fourni, réponds à la question de l'utilisateur de manière concise. Si la réponse n'est PAS dans le CONTEXTE, dis CLAIREMENT 'Je ne trouve pas cette information dans les documents fournis.' Ne fabrique pas de réponses."),
         ("system", "Contexte: {context}"),
@@ -37,29 +36,30 @@ def initialize_chains():
         ("user", "{input}")
     ])
 
-    # Prompt pour le mode RAG avec fallback / général
-    # Ce prompt est le même que votre prompt RAG actuel, car il permet déjà un certain fallback de par sa formulation.
-    # On pourrait aussi en créer un 3ème pour le cas LLM seul, mais pour l'instant, celui-ci fonctionne bien.
-    rag_prompt = ChatPromptTemplate.from_messages([
-        ("system", "En te basant STRICTEMENT et UNIQUEMENT sur le CONTEXTE fourni, réponds à la question de l'utilisateur de manière concise. Si la réponse n'est PAS dans le CONTEXTE, dis CLAIREMENT 'Je ne trouve pas cette information dans les documents fournis.' Ne fabrique pas de réponses."),
+    # 2. Prompt pour le mode "Général (LLM seul ou RAG avec fallback)"
+    # Ce prompt peut être le même que le strict, car la logique de fallback sera gérée par le code Python.
+    # Alternativement, on pourrait le rendre légèrement moins restrictif si le fallback est souhaité directement par le prompt.
+    # Pour l'instant, nous gardons la même formulation, la distinction sera dans la logique Python.
+    rag_fallback_prompt = ChatPromptTemplate.from_messages([
+        ("system", "En te basant sur le CONTEXTE fourni et tes connaissances générales, réponds à la question de l'utilisateur de manière précise. Si le contexte ne contient pas l'information principale, utilise tes connaissances générales. Ne fabrique pas de réponses qui ne seraient basées sur rien."), # Légèrement modifié pour indiquer l'usage des connaissances générales
         ("system", "Contexte: {context}"),
         ("system", "Historique de la conversation: {chat_history}"),
         ("user", "{input}")
     ])
 
+    # La document_chain utilisera le prompt approprié au moment de la requête
+    # Nous ne créons qu'une seule document_chain ici, mais le prompt injecté sera choisi dynamiquement
+    document_chain = create_stuff_documents_chain(chat_llm_instance, rag_fallback_prompt) # Initialisation avec un prompt par défaut
 
-    document_chain = create_stuff_documents_chain(chat_llm_instance, rag_prompt) # type: ignore [reportCallIssue]
-    # Nous pourrions aussi créer un document_chain_strict pour le rag_strict_prompt si nécessaire,
-    # mais la logique de basculement sera gérée au niveau de la route.
-
+    # Chaîne pour le LLM général (sans RAG)
     general_llm_prompt_template = ChatPromptTemplate.from_messages([
         ("system", "Vous êtes un assistant IA expert en développement, en codage, et en configurations Linux. Répondez aux questions de manière précise et concise, fournissez des exemples de code si nécessaire. Si vous ne trouvez pas la réponse, dites simplement que vous ne savez pas."),
         ("system", "{chat_history}"),
         ("user", "{input}")
     ])
-    general_llm_chain = general_llm_prompt_template | chat_llm_instance # type: ignore [reportCallIssue]
+    general_llm_chain = general_llm_prompt_template | chat_llm_instance
 
-    app.logger.info("Chaînes LangChain (document_chain, general_llm_chain) initialisées.")
+    app.logger.info("Chaînes LangChain (prompts RAG et général_llm_chain) initialisées.")
 
 
 # Route pour la page d'accueil de l'application
@@ -75,7 +75,7 @@ def chat():
     global current_conversation_id
     user_message = request.json.get('message')
     conv_id_from_request = request.json.get('conversation_id')
-    ephemeral_history_from_frontend = request.json.get('ephemeral_history', []) # type: ignore [reportOptionalMemberAccess]
+    ephemeral_history_from_frontend = request.json.get('ephemeral_history', [])
     rag_mode = request.json.get('rag_mode', 'fallback_rag') # Récupère le mode RAG, 'fallback_rag' par défaut
 
     if conv_id_from_request == "new_ephemeral":
@@ -94,15 +94,14 @@ def chat():
             chat_history_list = load_conversation_history(current_conversation_id)
         else:
             for msg in ephemeral_history_from_frontend:
-                sender = msg.get('sender') if isinstance(msg, dict) and 'sender' in msg and msg['sender'] is not None else None # type: ignore [reportOptionalMemberAccess]
-                content = msg.get('content') if isinstance(msg, dict) and 'content' in msg and msg['content'] is not None else None # type: ignore [reportOptionalMemberAccess]
+                sender = msg.get('sender') if isinstance(msg, dict) and 'sender' in msg and msg['sender'] is not None else None
+                content = msg.get('content') if isinstance(msg, dict) and 'content' in msg and msg['content'] is not None else None
                 if sender == 'user' and content is not None:
                     chat_history_list.append(HumanMessage(content=content))
                 elif sender == 'bot' and content is not None:
                     chat_history_list.append(AIMessage(content=content))
 
-        # Accéder directement au chat_llm depuis app.extensions
-        chat_llm_instance_for_memory = app.extensions["llm_service"]["chat_llm"] # type: ignore [reportOptionalSubscript]
+        chat_llm_instance_for_memory = app.extensions["llm_service"]["chat_llm"]
         if chat_llm_instance_for_memory is None:
             app.logger.error("Chat LLM non disponible dans app.extensions.")
             return jsonify({'response': "Erreur interne: Chat LLM non disponible."}), 500
@@ -114,13 +113,12 @@ def chat():
         )
         temp_memory.chat_memory.messages = chat_history_list
 
-        # Accéder directement aux instances RAG depuis app.extensions
-        current_vectorstore = app.extensions["rag_service"]["vectorstore"] # type: ignore [reportOptionalSubscript]
-        current_retriever = app.extensions["rag_service"]["retriever"]     # type: ignore [reportOptionalSubscript]
+        current_vectorstore = app.extensions["rag_service"]["vectorstore"]
+        current_retriever = app.extensions["rag_service"]["retriever"]
 
-        # Logique de traitement basée sur le mode RAG sélectionné
+        # ********** NOUVELLE LOGIQUE DE BASCULEMENT DU MODE RAG **********
+        # Si le RAG est initialisé et actif
         if current_vectorstore and current_retriever:
-            # Toujours tenter de récupérer des documents si RAG est actif
             app.logger.info(f"DEBUG RAG: Question utilisateur: '{user_message}' (Mode RAG: {rag_mode})")
             print(f"PRINT DEBUG RAG: Question utilisateur: '{user_message}' (Mode RAG: {rag_mode})")
 
@@ -129,15 +127,18 @@ def chat():
             app.logger.info(f"DEBUG RAG: Nombre de documents récupérés: {len(retrieved_docs)}")
             print(f"PRINT DEBUG RAG: Nombre de documents récupérés: {len(retrieved_docs)}")
 
-            for i, doc in enumerate(retrieved_docs):
-                source_info = doc.metadata.get('source', 'N/A') if isinstance(doc.metadata, dict) else 'N/A'
-                app.logger.info(f"  Doc {i+1} (Source: {source_info}): '{doc.page_content[:300]}...'")
-                print(f"PRINT DEBUG RAG:   Doc {i+1} (Source: {source_info}): '{doc.page_content[:300]}...'")
+            # Choisir le prompt RAG basé sur le mode sélectionné
+            selected_rag_prompt = rag_strict_prompt if rag_mode == 'strict_rag' else rag_fallback_prompt
+            
+            # Recréer la document_chain avec le prompt sélectionné
+            chat_llm_instance_for_chain = app.extensions["llm_service"]["chat_llm"]
+            dynamic_document_chain = create_stuff_documents_chain(chat_llm_instance_for_chain, selected_rag_prompt) # type: ignore [reportCallIssue]
+
 
             if len(retrieved_docs) > 0:
                 print("PRINT DEBUG RAG: Documents pertinents trouvés. Utilisation du RAG.")
                 app.logger.info("DEBUG RAG: Utilisation du RAG.")
-                rag_chain = create_retrieval_chain(current_retriever, document_chain) # type: ignore [reportArgumentTypeIssue]
+                rag_chain = create_retrieval_chain(current_retriever, dynamic_document_chain) # Utilise la chaîne dynamique
 
                 response_langchain = rag_chain.invoke({
                     "input": user_message,
@@ -145,22 +146,22 @@ def chat():
                 })
                 response_content = response_langchain["answer"]
 
-            elif rag_mode == 'strict_rag': # Si aucun document trouvé ET mode RAG strict
-                response_content = "Je ne trouve pas cette information dans les documents fournis."
-                app.logger.info("DEBUG RAG: Mode RAG strict activé. Aucun document trouvé, réponse générique fournie.")
-                print("PRINT DEBUG RAG: Mode RAG strict activé. Aucun document trouvé, réponse générique fournie.")
+            else: # Aucun document pertinent trouvé
+                if rag_mode == 'strict_rag':
+                    response_content = "Je ne trouve pas cette information dans les documents fournis."
+                    app.logger.info("DEBUG RAG: Mode RAG strict activé. Aucun document trouvé, réponse générique fournie.")
+                    print("PRINT DEBUG RAG: Mode RAG strict activé. Aucun document trouvé, réponse générique fournie.")
+                else: # fallback_rag ou autre mode par défaut
+                    print("PRINT DEBUG RAG: Aucun document pertinent trouvé. Basculement sur les connaissances générales du LLM.")
+                    app.logger.info("DEBUG RAG: Basculement sur les connaissances générales du LLM.")
 
-            else: # Aucun document trouvé, mais mode fallback ou RAG désactivé
-                print("PRINT DEBUG RAG: Aucun document pertinent trouvé. Basculement sur les connaissances générales du LLM.")
-                app.logger.info("DEBUG RAG: Basculement sur les connaissances générales du LLM.")
+                    response_langchain = general_llm_chain.invoke({ # type: ignore [reportCallIssue, reportOptionalMemberAccess]
+                        "input": user_message,
+                        "chat_history": temp_memory.load_memory_variables({})["chat_history"]
+                    })
+                    response_content = response_langchain.content # type: ignore [reportAttributeAccessIssue]
 
-                response_langchain = general_llm_chain.invoke({ # type: ignore [reportCallIssue, reportOptionalMemberAccess]
-                    "input": user_message,
-                    "chat_history": temp_memory.load_memory_variables({})["chat_history"]
-                })
-                response_content = response_langchain.content # type: ignore [reportAttributeAccessIssue]
-
-        else: # Ce bloc s'exécute si le RAG n'est pas initialisé (vectorstore ou retriever sont None)
+        else: # Ce bloc s'exécute si le RAG n'est PAS initialisé du tout au démarrage de l'app
             app.logger.info("INFO: RAG non actif ou initialisation échouée. Utilisation du LLM général par default.")
             print("PRINT DEBUG RAG: RAG inactif. Utilisation du LLM général par default.")
 
@@ -169,8 +170,9 @@ def chat():
                 "chat_history": temp_memory.load_memory_variables({})["chat_history"]
             })
             response_content = response_langchain.content # type: ignore [reportAttributeAccessIssue]
+        # ********** FIN DE LA NOUVELLE LOGIQUE DE BASCULEMENT DU MODE RAG **********
 
-        # Importe save_message ici (localement)
+
         from app.services.conversation_service import save_message
         if current_conversation_id:
             save_message(current_conversation_id, "user", user_message) # type: ignore [reportCallIssue]
