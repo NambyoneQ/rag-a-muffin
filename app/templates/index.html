@@ -71,19 +71,38 @@
         .bot-message { /* Messages du bot */
             background-color: #f1f0f0; align-self: flex-start; /* Aligné à gauche */
         }
-        
-        /* Pas de styles spécifiques pour le code Markdown si les bibliothèques ne sont pas incluses */
-        /* .message p:last-child { margin-bottom: 0; } */
-        /* .message pre { ... } */
-        /* .message code { ... } */
-        /* .message pre code { ... } */
 
         /* Styles pour la zone de saisie du message */
-        #input-area { display: flex; padding: 20px; background-color: #eee; border-top: 1px solid #ddd; }
-        #user-input { flex-grow: 1; padding: 10px; border: 1px solid #ccc; border-radius: 5px; margin-right: 10px; }
+        #input-area { display: flex; padding: 20px; background-color: #eee; border-top: 1px solid #ddd; flex-wrap: wrap;}
+        #user-input { flex-grow: 1; padding: 10px; border: 1px solid #ccc; border-radius: 5px; margin-right: 10px; min-width: 200px;}
         #send-button { padding: 10px 20px; background-color: #4CAF50; color: white; border: none; border-radius: 5px; cursor: pointer; }
         #send-button:hover { background-color: #45a049; }
         #loading-indicator { display: none; text-align: center; padding: 10px; color: #888; } /* Indicateur de chargement */
+
+        /* NOUVEAUX STYLES POUR LE MODE RAG */
+        #rag-mode-selection {
+            width: 100%;
+            margin-bottom: 15px;
+            color: #333; /* Texte plus sombre pour le mode RAG */
+            display: flex;
+            align-items: center;
+            justify-content: flex-start; /* Aligner à gauche */
+            gap: 15px; /* Espacement entre les radios */
+            background-color: #e0e0e0;
+            padding: 10px;
+            border-radius: 5px;
+        }
+        #rag-mode-selection label {
+            margin-right: 5px;
+            font-weight: bold;
+        }
+        #rag-mode-selection input[type="radio"] {
+            margin-right: 5px;
+        }
+        #rag-mode-selection span {
+            font-weight: normal; /* Pour le texte descriptif des options */
+            color: #555;
+        }
     </style>
 </head>
 <body>
@@ -96,12 +115,19 @@
                 </ul>
         </div>
     </div>
-    
+
     <div id="main-content">
         <div id="chat-box">
             </div>
         <div id="loading-indicator">Chargement...</div>
         <div id="input-area">
+            <div id="rag-mode-selection">
+                <label>Mode RAG:</label>
+                <input type="radio" id="rag-strict" name="rag_mode" value="strict_rag">
+                <label for="rag-strict">RAG uniquement</label>
+                <input type="radio" id="rag-fallback" name="rag_mode" value="fallback_rag" checked>
+                <label for="rag-fallback">Général (LLM seul ou RAG avec fallback)</label>
+            </div>
             <input type="text" id="user-input" placeholder="Tapez votre message...">
             <button id="send-button">Envoyer</button>
         </div>
@@ -121,7 +147,7 @@
         const ephemeralConvBtn = document.getElementById('ephemeral-conv-btn');
 
         // Fonction pour afficher un message dans la boîte de chat
-        function displayMessage(sender, content) { // Plus de paramètre isStreaming
+        function displayMessage(sender, content) {
             const messageDiv = document.createElement('div');
             messageDiv.classList.add('message');
             messageDiv.classList.add(sender === 'user' ? 'user-message' : 'bot-message');
@@ -139,7 +165,7 @@
         async function loadConversation(convId) {
             currentConversationId = convId;
             chatBox.innerHTML = ''; // Vide la boîte de chat actuelle
-            
+
             // Met à jour l'état visuel du bouton de conversation actif dans la barre latérale
             document.querySelectorAll('#conversation-list button').forEach(btn => btn.classList.remove('active'));
             ephemeralConvBtn.classList.remove('active');
@@ -273,16 +299,21 @@
                     content: msg.content
                 }));
             }
-            
+
+            // DÉBUT DE LA NOUVELLE LOGIQUE POUR LE MODE RAG EN JAVASCRIPT
+            const ragMode = document.querySelector('input[name="rag_mode"]:checked').value; // Récupère la valeur du bouton radio sélectionné
+            // FIN DE LA NOUVELLE LOGIQUE POUR LE MODE RAG EN JAVASCRIPT
+
             try {
                 // Utilise fetch pour envoyer une requête POST classique
-                const response = await fetch('/chat', { // Remplace /chat_stream par /chat
+                const response = await fetch('/chat', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ 
-                        message: message, 
+                    body: JSON.stringify({
+                        message: message,
                         conversation_id: currentConversationId,
-                        ephemeral_history: historyToSend 
+                        ephemeral_history: historyToSend,
+                        rag_mode: ragMode // Ajoute le mode RAG à la requête
                     })
                 });
 
