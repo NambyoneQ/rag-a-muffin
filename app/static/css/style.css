@@ -96,3 +96,26 @@ body {
     font-weight: normal; /* Pour le texte descriptif des options */
     color: #555;
 }
+.message pre {
+    background-color: #2d2d2d; /* Fond sombre pour le code */
+    color: #f8f8f2; /* Texte clair */
+    padding: 10px;
+    border-radius: 5px;
+    overflow-x: auto; /* Permet le défilement horizontal si le code est long */
+    margin-top: 10px;
+    font-family: 'Consolas', 'Monaco', 'Andale Mono', 'Ubuntu Mono', monospace;
+    font-size: 0.9em;
+    line-height: 1.4;
+}
+
+.message code {
+    background-color: #e6e6e6; /* Fond clair pour le code inline */
+    padding: 2px 4px;
+    border-radius: 3px;
+    font-family: 'Consolas', 'Monaco', 'Andale Mono', 'Ubuntu Mono', monospace;
+}
+
+.message pre code {
+    background-color: transparent; /* Pas de fond spécial pour le code dans <pre> */
+    padding: 0;
+}

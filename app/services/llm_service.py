@@ -70,7 +70,7 @@ def initialize_llms():
     _chat_llm_instance = ChatOpenAI(
         base_url=current_app.config['LMSTUDIO_UNIFIED_API_BASE'],
         api_key=current_app.config['LMSTUDIO_API_KEY'],
-        model="Llama-3.1-8B-UltraLong-4M-Instruct-Q4_K_M",
+        model="llama-3.1-8b-ultralong-4m-instruct",
         temperature=0.4,
     )
 

@@ -18,9 +18,15 @@ class Config:
 
     # --- Configurations pour LM Studio UNIFIÉ (remplace Jan.ai et LM Studio Embeddings séparés) ---
     # LM Studio sert les deux APIs (chat et embeddings) sur le même BASE_URL
-    LMSTUDIO_UNIFIED_API_BASE = "http://localhost:1234/v1" # Base d'URL unique
-    LMSTUDIO_API_KEY = os.environ.get('LMSTUDIO_API_KEY') # La clé API (la même pour les deux)
+    LMSTUDIO_UNIFIED_API_BASE = "http://localhost:1234/v1"
+    LMSTUDIO_API_KEY = os.environ.get('LMSTUDIO_API_KEY')
+
+    # NOUVELLE LIGNE AJOUTÉE OU CORRIGÉE POUR LMSTUDIO_CHAT_MODEL
+    # Assurez-vous que le nom du modèle correspond à celui que vous avez chargé dans LM Studio.
+    # Si vous utilisez un modèle plus léger (ex: Phi-3-mini-4k-instruct-gguf), remplacez la valeur par défaut.
+    LMSTUDIO_CHAT_MODEL = os.environ.get('LMSTUDIO_CHAT_MODEL', 'Llama-3.1-8B-UltraLong-4M-Instruct-Q4_K_M')
 
     # Chemins vers les dossiers RAG
     KNOWLEDGE_BASE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'kb_documents')
+    CODE_BASE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'codebase')
     CHROMA_PERSIST_DIRECTORY = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'chroma_db')

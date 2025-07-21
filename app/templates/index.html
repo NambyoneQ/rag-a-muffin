@@ -23,18 +23,40 @@
             </div>
         <div id="loading-indicator">Chargement...</div>
         <div id="input-area">
-            <div id="rag-mode-selection">
-                <label>Mode RAG:</label>
-                <input type="radio" id="rag-strict" name="rag_mode" value="strict_rag">
-                <label for="rag-strict">RAG uniquement</label>
-                <input type="radio" id="rag-fallback" name="rag_mode" value="fallback_rag" checked>
-                <label for="rag-fallback">Général (LLM seul ou RAG avec fallback)</label>
+            <div id="search-mode-selection">
+                <label>Mode de recherche:</label>
+                <input type="radio" id="mode-general" name="search_mode" value="general" checked>
+                <label for="mode-general">Général (LLM seul)</label>
+
+                <input type="radio" id="mode-kb" name="search_mode" value="kb_rag">
+                <label for="mode-kb">Base de Connaissance (RAG)</label>
+
+                <input type="radio" id="mode-code" name="search_mode" value="code_rag">
+                <label for="mode-code">Codebase (RAG)</label>
             </div>
+
+            <div id="project-selection" style="display: none; width: 100%; margin-bottom: 15px;">
+                <label for="project-select">Sélectionner un projet:</label>
+                <select id="project-select" class="form-select">
+                    <option value="">-- Choisir un projet --</option>
+                    {% for project_name in project_names %}
+                    <option value="{{ project_name }}">{{ project_name }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+
+            <div id="rag-strictness-selection" style="width: 100%; margin-bottom: 15px;">
+                <input type="checkbox" id="strict-mode-checkbox" name="strict_mode">
+                <label for="strict-mode-checkbox">Mode Strict (Répond uniquement si l'info est dans les docs/code)</label>
+            </div>
+
+
             <input type="text" id="user-input" placeholder="Tapez votre message...">
             <button id="send-button">Envoyer</button>
         </div>
     </div>
 
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <script src="{{ url_for('static', filename='js/script.js') }}"></script>
 </body>
 </html>
