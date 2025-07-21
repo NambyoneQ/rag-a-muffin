@@ -158,25 +158,40 @@ The application will start, perform initial database setup, and index your knowl
 
 ```code
 .
+your_project_root/
 ├── app/
-│   ├── __init__.py             # Flask app initialization, service registration
-│   ├── models.py               # SQLAlchemy database models (Conversation, Message, DocumentStatus)
+│   ├── __init__.py             # Initialisation de l'application Flask, configuration des services et enregistrement du Blueprint.
+│   ├── models.py               # Définition des modèles de base de données (Conversation, Message, DocumentStatus).
 │   ├── routes/
-│   │   └── chat_routes.py      # Flask routes for chat and conversation management
-│   └── services/
-│       ├── __init__.py
-│       ├── conversation_service.py # Logic for loading/saving chat history
-│       ├── llm_service.py          # LLM (ChatOpenAI) and Embeddings (LMStudioCustomEmbeddings) initialization
-│       └── rag_service.py          # ChromaDB, document loading, splitting, and incremental indexing
-├── config.py                   # Application configuration (DB, LM Studio, RAG paths)
-├── kb_documents/               # Your knowledge base documents (.txt, .pdf)
-├── chroma_db/                  # Persistent directory for ChromaDB vector store (created by app)
-├── templates/
-│   └── index.html              # Frontend HTML for the chat interface
-├── .env.example                # Example environment variables file
-├── .gitignore                  # Files ignored by Git
-├── requirements.txt            # Python dependencies
-└── run.py                      # Entry point to run the Flask application
+│   │   └── chat_routes.py      # Définition du Blueprint 'chat_bp' et de toutes les routes de l'API (index, chat, conversations, etc.).
+│   ├── services/
+│   │   ├── __init__.py         # (Vide ou basique)
+│   │   ├── conversation_service.py # Logique de chargement et sauvegarde de l'historique des conversations.
+│   │   ├── llm_service.py          # Initialisation des instances de LLM et d'embeddings (LM Studio).
+│   │   └── rag_service.py          # Gestion du Vector Store (ChromaDB), chargement et mise à jour incrémentale des documents/codes.
+│   ├── static/                 # Fichiers statiques servis par Flask (CSS, JS, etc.)
+│   │   ├── css/
+│   │   │   └── style.css       # Styles CSS de l'interface utilisateur.
+│   │   └── js/
+│   │       └── script.js       # Logique JavaScript pour le frontend (interactions, envoi/réception de messages).
+│   └── templates/
+│       └── index.html          # Template HTML principal de l'interface utilisateur.
+├── codebase/                   # NOUVEAU : Dossier racine pour vos bases de code organisées par projet.
+│   ├── project_A/              # Exemple : Sous-dossier pour le projet A
+│   │   ├── file1.py
+│   │   └── module.js
+│   ├── project_B/              # Exemple : Sous-dossier pour le projet B
+│   │   └── index.php
+│   │   └── styles.css
+│   └── ...                     # Autres projets...
+├── kb_documents/               # Dossier pour les documents de la base de connaissance générale (fichiers .txt, .pdf).
+├── chroma_db/                  # Dossier persistant pour le Vector Store ChromaDB (créé et géré par l'application).
+├── config.py                   # Fichier de configuration de l'application (base de données, LM Studio, chemins RAG).
+├── .env                        # Fichier des variables d'environnement (non versionné).
+├── .env.example                # Exemple de fichier .env (pour la documentation).
+├── .gitignore                  # Fichier de configuration Git pour ignorer certains fichiers/dossiers.
+├── requirements.txt            # Liste des dépendances Python du projet.
+└── run.py                      # Point d'entrée de l'application Flask.
 ```
 
 ## Contributing
