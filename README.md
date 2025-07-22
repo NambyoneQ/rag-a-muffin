@@ -1,12 +1,16 @@
-# Local RAG Chatbot (Work in Progress)
+# Local RAG Assistant (Work in Progress)
 
-This project is a Flask-based web application designed to demonstrate and implement a local Retrieval-Augmented Generation (RAG) chatbot. It allows users to interact with a Large Language Model (LLM) powered by LM Studio, augmented with a knowledge base for contextual responses.
+This project is a Flask-based web application designed to implement a local Retrieval-Augmented Generation (RAG) chatbot. It allows users to interact with a Large Language Model (LLM), augmented with a knowledge base for contextual responses.
 
 This system is designed and developed to meet the management needs of small and medium-sized enterprises. The goal is to allow leaders to stay informed about ongoing projects and tasks at any level and to make informed decisions.
 
 At this stage, the RAG (Retrieval Augmented Generation) system ingests documents and open-source code.
 
 The current challenge is to find the right balance for chunk size, indexing, and retrieval to minimize hallucinations or confusion by the LLM. The LLM currently in use is quite versatile: Llama-3.1-8b-ultralong-4m-instruct.
+
+The knowledge base stands for helping in data analysis.
+
+The codebase stands for helping create or customize tools to fit the needs of the workflow in place.
 
 ## Table of Contents
 
