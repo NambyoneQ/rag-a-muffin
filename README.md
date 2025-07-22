@@ -2,6 +2,12 @@
 
 This project is a Flask-based web application designed to demonstrate and implement a local Retrieval-Augmented Generation (RAG) chatbot. It allows users to interact with a Large Language Model (LLM) powered by LM Studio, augmented with a knowledge base for contextual responses.
 
+This system is designed and developed to meet the management needs of small and medium-sized enterprises. The goal is to allow leaders to stay informed about ongoing projects and tasks at any level and to make informed decisions.
+
+At this stage, the RAG (Retrieval Augmented Generation) system ingests documents and open-source code.
+
+The current challenge is to find the right balance for chunk size, indexing, and retrieval to minimize hallucinations or confusion by the LLM. The LLM currently in use is quite versatile: Llama-3.1-8b-ultralong-4m-instruct.
+
 ## Table of Contents
 
 - [Features](#features)
@@ -30,6 +36,7 @@ This application currently provides the following core functionalities:
   - **History Loading & Saving**: Seamlessly loads past conversation history and saves new messages for persistent chats.
 - **Retrieval-Augmented Generation (RAG)**:
   - **Local Knowledge Base**: Utilizes a `kb_documents` directory to store `.txt` and `.pdf` files as a source of external knowledge.
+  - **Local CodeBase**: Utilizes a `codebase` directory to store all files as a source of external knowledge.
   - **ChromaDB Vector Store**: Employs ChromaDB for efficient storage and retrieval of document embeddings, providing contextual information to the LLM.
   - **Incremental Knowledge Base Updates**: Automatically detects and processes new, modified, and deleted documents in the `kb_documents` folder on application startup, keeping the vector store synchronized and optimized.
   - **Intelligent Fallback**: If no relevant documents are found by the RAG system for a query, the chatbot intelligently falls back to using the LLM's general knowledge.
@@ -44,14 +51,14 @@ This project is under active development. Planned features and improvements incl
 - **Error Handling & User Feedback**: Provide more detailed and user-friendly error messages directly in the UI.
 - **Configuration Options in UI**: Allow users to configure LLM parameters (e.g., temperature, model name) via the web interface.
 - **Multi-User Support**: Implement user authentication and separation of conversations for multiple users.
-- **More Document Types**: Expand support for additional document formats (e.g., Markdown, DOCX).
+- **More Document Types**: Expand support for additional document formats (e.g., Markdown, DOCX, XLS).
 - **Advanced RAG Techniques**: Explore techniques like query rewriting, re-ranking, or hybrid search.
 
 ## Prerequisites
 
 Before running this application, ensure you have the following installed:
 
-- **Python 3.8+**
+- **Python 3.10+**
 - **pip** (Python package installer)
 - **Git**
 - **PostgreSQL**: A running PostgreSQL server for conversation history persistence.
