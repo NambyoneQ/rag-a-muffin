@@ -157,7 +157,41 @@ The application will start, perform initial database setup, and index your knowl
 ## Project Structure
 
 ```code
-R�pertoire : C:\ProjectDev\Projet_Test\\n\\n- **Fichier** : `.env`\\n- **Dossier** : `.git`\\n  - Fichier : `COMMIT_EDITMSG`\\n  - Fichier : `config`\\n  - Fichier : `description`\\n  - Fichier : `FETCH_HEAD`\\n  - Fichier : `HEAD`\\n  - Dossier : `hooks`\\n  - Fichier : `index`\\n  - Dossier : `info`\\n  - Dossier : `logs`\\n  - Dossier : `objects`\\n  - Fichier : `ORIG_HEAD`\\n  - Dossier : `refs`\\n- **Fichier** : `.gitignore`\\n- **Dossier** : `app`\\n  - Fichier : `models.py`\\n  - Dossier : `routes`\\n  - Dossier : `services`\\n  - Dossier : `static`\\n  - Dossier : `templates`\\n  - Fichier : `__init__.py`\\n  - Dossier : `__pycache__`\\n- **Dossier** : `chroma_db`\\n  - Fichier : `chroma.sqlite3`\\n  - Dossier : `e8ebc50a-d597-40cc-905f-c889c06369d5`\\n- **Dossier** : `codebase`\\n  - Dossier : `tracker_api_server`\\n- **Fichier** : `config.py`\\n- **Fichier** : `fodler_structure.py`\\n- **Dossier** : `kb_documents`\\n  - Fichier : `BioMed Solutions.txt`\\n  - Fichier : `EcoCycle.txt`\\n  - Fichier : `event_log.txt`\\n  - Fichier : `famille rakotomandimby.txt`\\n  - Fichier : `GreenScape.txt`\\n  - Fichier : `GreenTech Inc..txt`\\n  - Fichier : `Netino.txt`\\n  - Fichier : `qwanteos.txt`\\n  - Dossier : `SL Soccer Wiki`\\n  - Fichier : `TechNova.txt`\\n  - Fichier : `workflow_footovision_qwanteos.txt`\\n- **Fichier** : `README.md`\\n- **Fichier** : `requirements.txt`\\n- **Fichier** : `run.py`\\n- **Dossier** : `venv`\\n  - Dossier : `Include`\\n  - Dossier : `Lib`\\n  - Fichier : `pyvenv.cfg`\\n  - Dossier : `Scripts`\\n  - Dossier : `share`\\n- **Dossier** : `__pycache__`\\n  - Fichier : `config.cpython-310.pyc`\\n
+.
+your_project_root/
+├── app/
+│   ├── __init__.py             # Initialisation de l'application Flask, configuration des services et enregistrement du Blueprint.
+│   ├── models.py               # Définition des modèles de base de données (Conversation, Message, DocumentStatus).
+│   ├── routes/
+│   │   └── chat_routes.py      # Définition du Blueprint 'chat_bp' et de toutes les routes de l'API (index, chat, conversations, etc.).
+│   ├── services/
+│   │   ├── __init__.py         # (Vide ou basique)
+│   │   ├── conversation_service.py # Logique de chargement et sauvegarde de l'historique des conversations.
+│   │   ├── llm_service.py          # Initialisation des instances de LLM et d'embeddings (LM Studio).
+│   │   └── rag_service.py          # Gestion du Vector Store (ChromaDB), chargement et mise à jour incrémentale des documents/codes.
+│   ├── static/                 # Fichiers statiques servis par Flask (CSS, JS, etc.)
+│   │   ├── css/
+│   │   │   └── style.css       # Styles CSS de l'interface utilisateur.
+│   │   └── js/
+│   │       └── script.js       # Logique JavaScript pour le frontend (interactions, envoi/réception de messages).
+│   └── templates/
+│       └── index.html          # Template HTML principal de l'interface utilisateur.
+├── codebase/                   # NOUVEAU : Dossier racine pour vos bases de code organisées par projet.
+│   ├── project_A/              # Exemple : Sous-dossier pour le projet A
+│   │   ├── file1.py
+│   │   └── module.js
+│   ├── project_B/              # Exemple : Sous-dossier pour le projet B
+│   │   └── index.php
+│   │   └── styles.css
+│   └── ...                     # Autres projets...
+├── kb_documents/               # Dossier pour les documents de la base de connaissance générale (fichiers .txt, .pdf).
+├── chroma_db/                  # Dossier persistant pour le Vector Store ChromaDB (créé et géré par l'application).
+├── config.py                   # Fichier de configuration de l'application (base de données, LM Studio, chemins RAG).
+├── .env                        # Fichier des variables d'environnement (non versionné).
+├── .env.example                # Exemple de fichier .env (pour la documentation).
+├── .gitignore                  # Fichier de configuration Git pour ignorer certains fichiers/dossiers.
+├── requirements.txt            # Liste des dépendances Python du projet.
+└── run.py                      # Point d'entrée de l'application Flask.
 ```
 
 ## Contributing
