@@ -5,7 +5,7 @@ let ephemeralChatHistory = []; // Historique de la conversation éphémère (sto
 
 // Récupération des éléments du DOM
 const chatBox = document.getElementById('chat-box');
-const userInput = document.getElementById('user-input');
+const userInput = document.getElementById('user-input'); // C'est maintenant un textarea
 const sendButton = document.getElementById('send-button');
 const loadingIndicator = document.getElementById('loading-indicator');
 const conversationList = document.getElementById('conversation-list');
@@ -21,21 +21,57 @@ const strictModeCheckbox = document.getElementById('strict-mode-checkbox');
 
 
 // Fonction pour afficher un message dans la boîte de chat AVEC RENDU MARKDOWN
+// Fonction pour afficher un message dans la boîte de chat AVEC RENDU MARKDOWN ET BOUTON COPIER
 function displayMessage(sender, content) {
     const messageDiv = document.createElement('div');
     messageDiv.classList.add('message');
     messageDiv.classList.add(sender === 'user' ? 'user-message' : 'bot-message');
 
-    // Pour les messages de l'utilisateur, afficher le texte brut.
-    // Pour les messages du bot, utiliser marked.js pour rendre le Markdown en HTML.
     if (sender === 'user') {
         messageDiv.textContent = content;
     } else {
-        // S'assurer que marked est disponible globalement (chargé par le script dans index.html)
         if (typeof marked !== 'undefined') {
-            messageDiv.innerHTML = marked.parse(content);
+            const renderedHtml = marked.parse(content); // Rendre le Markdown
+            messageDiv.innerHTML = renderedHtml;
+
+            // NOUVELLE LOGIQUE : Ajouter un bouton copier aux blocs de code
+            const codeBlocks = messageDiv.querySelectorAll('pre'); // Trouver tous les blocs <pre>
+            codeBlocks.forEach(preBlock => {
+                const copyButton = document.createElement('button');
+                copyButton.className = 'copy-button'; // Appliquer la classe CSS
+                copyButton.textContent = 'Copier';
+                copyButton.onclick = () => { // Gestionnaire d'événements au clic
+                    const code = preBlock.querySelector('code'); // Trouver le <code> à l'intérieur du <pre>
+                    if (code && navigator.clipboard) { // Vérifier si l'API Clipboard est disponible
+                        navigator.clipboard.writeText(code.textContent || '').then(() => {
+                            copyButton.textContent = 'Copié !'; // Feedback visuel
+                            setTimeout(() => {
+                                copyButton.textContent = 'Copier';
+                            }, 2000); // Réinitialiser le texte après 2 secondes
+                        }).catch(err => {
+                            console.error('Erreur de copie:', err);
+                            copyButton.textContent = 'Erreur';
+                        });
+                    } else if (code) { // Fallback si l'API Clipboard n'est pas supportée
+                        // Méthode de copie plus ancienne (déconseillée)
+                        const range = document.createRange();
+                        range.selectNodeContents(code);
+                        const selection = window.getSelection();
+                        if (selection) {
+                            selection.removeAllRanges();
+                            selection.addRange(range);
+                            document.execCommand('copy');
+                            selection.removeAllRanges();
+                            copyButton.textContent = 'Copié (fallback)!';
+                            setTimeout(() => { copyButton.textContent = 'Copier'; }, 2000);
+                        }
+                    }
+                };
+                preBlock.appendChild(copyButton); // Ajouter le bouton au bloc <pre>
+            });
+
         } else {
-            messageDiv.textContent = content; // Fallback si marked.js n'est pas chargé
+            messageDiv.textContent = content;
             console.warn("Marked.js non disponible. Le rendu Markdown ne sera pas effectué.");
         }
     }
@@ -43,9 +79,6 @@ function displayMessage(sender, content) {
     chatBox.appendChild(messageDiv);
     chatBox.scrollTop = chatBox.scrollHeight;
 
-    // Mise à jour de l'historique éphémère si la conversation active est éphémère
-    // Cette logique est cruciale : ephemeralChatHistory n'est rempli que pour les sessions éphémères
-    // et il est vidé lors du changement de conversation (voir loadConversation).
     if (currentConversationId === "new_ephemeral") {
         ephemeralChatHistory.push({ sender: sender, content: content });
     }
@@ -53,29 +86,21 @@ function displayMessage(sender, content) {
 
 // Charge et affiche les messages d'une conversation spécifique (persistante ou éphémère)
 async function loadConversation(convId) {
-    // 1. Mise à jour de l'ID de la conversation active
     currentConversationId = convId;
-
-    // 2. Vider la boîte de chat visible
     chatBox.innerHTML = '';
 
-    // 3. Mise à jour de l'état visuel du bouton de conversation actif dans la barre latérale
     document.querySelectorAll('#conversation-list button').forEach(btn => btn.classList.remove('active'));
     if (ephemeralConvBtn) ephemeralConvBtn.classList.remove('active');
     
-    // 4. Gestion de l'historique interne : Vider ephemeralChatHistory AVANT de potentiellement le remplir ou le laisser vide
     ephemeralChatHistory = []; 
 
     if (convId === "new_ephemeral") {
-        // Si c'est une nouvelle conversation éphémère
         if (ephemeralConvBtn) ephemeralConvBtn.classList.add('active');
         displayMessage('bot', 'Nouvelle conversation éphémère activée.');
     } else {
-        // Si c'est une conversation persistante, activer le bouton correspondant
         const activeBtn = document.querySelector(`#conversation-list button[data-id="${convId}"]`);
         if (activeBtn) activeBtn.classList.add('active');
 
-        // Charger les messages de la conversation persistante depuis le backend
         loadingIndicator.style.display = 'block';
         try {
             const response = await fetch(`/conversations/${convId}`);
@@ -83,8 +108,6 @@ async function loadConversation(convId) {
                 throw new Error(`Erreur HTTP: ${response.status}`);
             }
             const messages = await response.json();
-            // Afficher les messages chargés. Ils ne sont PAS ajoutés à ephemeralChatHistory ici.
-            // ephemeralChatHistory reste vide pour les conversations persistantes.
             messages.forEach(msg => displayMessage(msg.sender, msg.content));
         } catch (error) {
             console.error('Erreur lors du chargement de la conversation:', error);
@@ -98,14 +121,14 @@ async function loadConversation(convId) {
 // Récupère et affiche la liste des conversations persistantes depuis le backend
 async function fetchConversations() {
     try {
-        const response = await fetch('/conversations'); // Requête GET sur /conversations
-        if (!response.ok) { // Vérifie si la réponse HTTP est OK (200-299)
+        const response = await fetch('/conversations');
+        if (!response.ok) {
             throw new Error(`Erreur HTTP: ${response.status}`);
         }
         const conversations = await response.json();
-        console.log("Conversations fetched:", conversations); // Log pour le débogage
+        console.log("Conversations fetched:", conversations);
 
-        conversationList.innerHTML = ''; // Vide la liste actuelle
+        conversationList.innerHTML = '';
         conversations.forEach(conv => {
             const li = document.createElement('li');
             const button = document.createElement('button');
@@ -128,7 +151,6 @@ async function fetchConversations() {
         });
     } catch (error) {
         console.error('Erreur lors du chargement des conversations:', error);
-        // Afficher un message à l'utilisateur si aucune conversation ne peut être chargée
         const errorItem = document.createElement('li');
         errorItem.textContent = "Erreur de chargement des conversations.";
         errorItem.style.color = "red";
@@ -149,9 +171,8 @@ if (newConvBtn) {
                 });
                 const data = await response.json();
                 if (response.ok) {
-                    await fetchConversations(); // Met à jour la liste des conversations
-                    loadConversation(data.id); // Charge la nouvelle conversation
-                    // displayMessage('bot', `Conversation "${convName}" créée et activée.`); // Déjà appelé par loadConversation
+                    await fetchConversations();
+                    loadConversation(data.id);
                 } else {
                     alert('Erreur: ' + (data.error || 'Impossible de créer la conversation.'));
                 }
@@ -166,7 +187,7 @@ if (newConvBtn) {
 // Gère le basculement vers une nouvelle conversation éphémère
 if (ephemeralConvBtn) {
     ephemeralConvBtn.onclick = () => {
-        loadConversation("new_ephemeral"); // Appelle loadConversation pour gérer le reset
+        loadConversation("new_ephemeral");
     };
 }
 
@@ -177,9 +198,9 @@ async function deleteConversation(convId) {
         if (response.ok) {
             await fetchConversations();
             if (currentConversationId === convId) {
-                loadConversation("new_ephemeral"); // Bascule vers l'éphémère si la conversation active est supprimée
+                loadConversation("new_ephemeral");
             } else {
-                displayMessage('bot', 'Conversation supprimée.'); // Message si la conversation supprimée n'était pas active
+                displayMessage('bot', 'Conversation supprimée.');
             }
         } else {
             const data = await response.json();
@@ -191,7 +212,7 @@ async function deleteConversation(convId) {
     }
 }
 
-// NOUVELLE LOGIQUE POUR L'AFFICHAGE DU SÉLECTEUR DE PROJET
+// Logique pour l'affichage du sélecteur de projet et de la checkbox strict
 searchModeRadios.forEach(radio => {
     radio.addEventListener('change', () => {
         if (radio.value === 'code_rag') {
@@ -225,8 +246,6 @@ sendButton.onclick = async () => {
     loadingIndicator.style.display = 'block';
 
     let historyToSend = [];
-    // N'envoyer l'historique que si currentConversationId est "new_ephemeral" (null côté backend)
-    // Pour les persistantes, le backend le chargera lui-même de la BDD
     if (currentConversationId === "new_ephemeral") { 
         historyToSend = ephemeralChatHistory.map(msg => ({
             sender: msg.sender,
@@ -270,14 +289,12 @@ sendButton.onclick = async () => {
     try {
         let requestBody = {
             message: message,
-            // conversation_id sera null pour l'éphémère, ou l'ID pour le persistant
             conversation_id: currentConversationId, 
             rag_mode: ragModeParam,
             selected_project: selectedProject,
             strict_mode: strictModeCheckbox ? strictModeCheckbox.checked : false 
         };
 
-        // Seulement ajouter ephemeral_history au body si c'est une conversation éphémère (currentConversationId est "new_ephemeral")
         if (currentConversationId === "new_ephemeral") {
             requestBody.ephemeral_history = historyToSend;
         }
@@ -309,7 +326,6 @@ sendButton.onclick = async () => {
 
         displayMessage('bot', data.response);
 
-        // Seulement ajouter la réponse du bot à ephemeralChatHistory si c'est une conversation éphémère
         if (currentConversationId === "new_ephemeral") {
             ephemeralChatHistory.push({ sender: 'bot', content: data.response });
         }
@@ -326,19 +342,21 @@ sendButton.onclick = async () => {
     }
 };
 
-userInput.addEventListener('keypress', function(e) {
-    if (e.key === 'Enter') {
-        sendButton.click();
+// Gestionnaire d'événements pour les sauts de ligne avec Shift+Entrée dans le textarea
+userInput.addEventListener('keydown', function(e) {
+    // Si Entrée est pressée SANS Shift
+    if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault(); // Empêche le saut de ligne par défaut dans le textarea
+        sendButton.click(); // Déclenche l'envoi du message
     }
+    // Si Shift+Entrée est pressé, le comportement par défaut (saut de ligne) est autorisé.
 });
+
 
 document.addEventListener('DOMContentLoaded', () => {
     fetchConversations();
-    // Au démarrage de l'application, activer la conversation éphémère par défaut,
-    // ce qui va aussi vider l'historique éphémère.
     loadConversation("new_ephemeral"); 
 
-    // Initialiser l'état d'affichage du sélecteur de projet et de la checkbox strict
     const initialSearchMode = document.querySelector('input[name="search_mode"]:checked')?.value || 'general';
 
     if (projectSelectionDiv) {

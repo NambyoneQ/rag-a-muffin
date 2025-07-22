@@ -57,7 +57,8 @@ body {
     border-bottom: 1px solid #ddd;
 }
 /* Styles pour les messages individuels dans le chat */
-.message { margin-bottom: 15px; padding: 10px; border-radius: 8px; max-width: 80%; }
+.message { margin-bottom: 15px; padding: 10px; border-radius: 8px; max-width: 80%; white-space: pre-wrap; /* NOUVEL AJOUT : Préserve les retours à la ligne et les espaces */
+    word-break: break-word; /* Permet aux longs mots de se couper pour éviter le dépassement */}
 .user-message { /* Messages de l'utilisateur */
     background-color: #e1ffc7; align-self: flex-end; margin-left: auto; /* Aligné à droite */
 }
@@ -66,56 +67,113 @@ body {
 }
 
 /* Styles pour la zone de saisie du message */
-#input-area { display: flex; padding: 20px; background-color: #eee; border-top: 1px solid #ddd; flex-wrap: wrap;}
-#user-input { flex-grow: 1; padding: 10px; border: 1px solid #ccc; border-radius: 5px; margin-right: 10px; min-width: 200px;}
-#send-button { padding: 10px 20px; background-color: #4CAF50; color: white; border: none; border-radius: 5px; cursor: pointer; }
+#input-area { 
+    display: flex; 
+    flex-direction: column; /* CHANGEMENT CLÉ : Empile les éléments verticalement */
+    padding: 20px; 
+    background-color: #eee; 
+    border-top: 1px solid #ddd; 
+    /* flex-wrap: wrap; */ /* Moins nécessaire avec flex-direction: column */
+    align-items: flex-start; /* Alignement par défaut à gauche pour les éléments empilés */
+}
+/* Styles pour la TEXTAREA */
+#user-input { 
+    flex-grow: 1; /* Permet au textarea de prendre l'espace disponible */
+    padding: 10px; 
+    border: 1px solid #ccc; 
+    border-radius: 5px; 
+    margin-bottom: 10px; /* Espace sous le textarea */
+    width: 100%; /* S'assure que le textarea prend toute la largeur disponible */
+    resize: vertical; /* Permet le redimensionnement vertical par l'utilisateur */
+    min-height: 40px; /* Hauteur minimale pour une ligne visible */
+    box-sizing: border-box; /* Inclure padding/border dans la largeur/hauteur */
+}
+#send-button { 
+    padding: 10px 20px; 
+    background-color: #4CAF50; 
+    color: white; 
+    border: none; 
+    border-radius: 5px; 
+    cursor: pointer; 
+    align-self: flex-end; /* NOUVEL AJOUT : Aligne le bouton à droite en bas de la colonne */
+}
 #send-button:hover { background-color: #45a049; }
 #loading-indicator { display: none; text-align: center; padding: 10px; color: #888; } /* Indicateur de chargement */
 
-/* NOUVEAUX STYLES POUR LE MODE RAG */
-#rag-mode-selection {
-    width: 100%;
+/* Styles pour les sections de sélection (modes et strictness) */
+#search-mode-selection,
+#project-selection,
+#rag-strictness-selection {
+    width: 100%; /* S'assure qu'ils prennent toujours toute la largeur */
     margin-bottom: 15px;
-    color: #333; /* Texte plus sombre pour le mode RAG */
+    color: #333;
     display: flex;
     align-items: center;
-    justify-content: flex-start; /* Aligner à gauche */
-    gap: 15px; /* Espacement entre les radios */
+    justify-content: flex-start;
+    gap: 15px;
     background-color: #e0e0e0;
     padding: 10px;
     border-radius: 5px;
 }
-#rag-mode-selection label {
+/* Styles des labels et radios à l'intérieur des sections de sélection */
+#search-mode-selection label,
+#project-selection label,
+#rag-strictness-selection label {
     margin-right: 5px;
     font-weight: bold;
 }
-#rag-mode-selection input[type="radio"] {
+#search-mode-selection input[type="radio"],
+#search-mode-selection input[type="checkbox"], /* Pour la checkbox strict_mode */
+#project-selection select {
     margin-right: 5px;
 }
-#rag-mode-selection span {
-    font-weight: normal; /* Pour le texte descriptif des options */
+#search-mode-selection span {
+    font-weight: normal;
     color: #555;
 }
+
+/* Styles pour les blocs de code Markdown */
 .message pre {
-    background-color: #2d2d2d; /* Fond sombre pour le code */
-    color: #f8f8f2; /* Texte clair */
+    background-color: #2d2d2d;
+    color: #f8f8f2;
     padding: 10px;
     border-radius: 5px;
-    overflow-x: auto; /* Permet le défilement horizontal si le code est long */
+    overflow-x: auto;
     margin-top: 10px;
     font-family: 'Consolas', 'Monaco', 'Andale Mono', 'Ubuntu Mono', monospace;
     font-size: 0.9em;
     line-height: 1.4;
+    position: relative; /* IMPORTANT : permet de positionner le bouton Copier absolument */
+    padding-top: 30px; /* Laisse de l'espace en haut pour le bouton */
 }
 
 .message code {
-    background-color: #e6e6e6; /* Fond clair pour le code inline */
-    padding: 2px 4px;
-    border-radius: 3px;
-    font-family: 'Consolas', 'Monaco', 'Andale Mono', 'Ubuntu Mono', monospace;
+    background-color: transparent; /* Pour le code inline */
+    padding: 0;
 }
 
-.message pre code {
-    background-color: transparent; /* Pas de fond spécial pour le code dans <pre> */
-    padding: 0;
+/* NOUVEAUX STYLES POUR LE BOUTON COPIER */
+.copy-button {
+    position: absolute; /* Positionne le bouton par rapport au bloc <pre> */
+    top: 5px; /* Distance du haut */
+    right: 5px; /* Distance de la droite */
+    background-color: #555;
+    color: white;
+    border: none;
+    border-radius: 3px;
+    padding: 5px 10px;
+    font-size: 0.8em;
+    cursor: pointer;
+    opacity: 0; /* Caché par défaut */
+    transition: opacity 0.3s ease-in-out; /* Pour une apparition/disparition douce */
+    z-index: 10; /* S'assure qu'il est au-dessus du code */
+}
+
+/* Rendre le bouton visible au survol du bloc de code */
+.message pre:hover .copy-button {
+    opacity: 1;
+}
+
+.copy-button:hover {
+    background-color: #777; /* Changement de couleur au survol du bouton */
 }

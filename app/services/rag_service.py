@@ -58,16 +58,13 @@ def initialize_vectorstore():
             DocumentStatus.query.delete() # type: ignore [reportCallIssue]
             current_app.logger.info("Vector Store complètement recréé suite à une erreur.")
 
-        # Lancer le processus de mise à jour incrémentale
         try:
             _update_vectorstore_from_disk()
-        except RuntimeError as e: # Capture l'erreur spécifique de _update_vectorstore_from_disk
+        except RuntimeError as e:
             current_app.logger.error(f"Erreur critique lors de la mise à jour incrémentale du Vector Store: {e}")
-            # Ne relève pas l'erreur ici pour permettre à l'application de démarrer, mais RAG sera désactivé.
-            # Le rollback est déjà effectué à l'intérieur de _update_vectorstore_from_disk()
-            _vectorstore = None # S'assure que le vectorstore est None pour désactiver le RAG
-            _retriever = None # S'assure que le retriever est None
-            return # Sort de la fonction, car le RAG est désactivé
+            _vectorstore = None
+            _retriever = None
+            return
 
 
     if _vectorstore is not None:
@@ -97,6 +94,29 @@ def _update_vectorstore_from_disk():
 
     kb_dir = current_app.config['KNOWLEDGE_BASE_DIR']
     code_dir = current_app.config['CODE_BASE_DIR']
+    
+    # NOUVEAU: Définir les chemins de l'application elle-même pour EXCLUSION STRICTE
+    # Ces chemins sont relatifs à current_app.root_path, qui est la racine de votre projet.
+    APP_EXCLUSIONS_RELATIVE_TO_ROOT = [
+        'app',                 # Le dossier 'app' de votre chatbot
+        'run.py',              # Le fichier run.py à la racine
+        'config.py',           # Le fichier config.py
+        '.env',                # Fichiers d'environnement
+        '.env.example',
+        '.gitignore',
+        'requirements.txt',
+        'chroma_db',           # Le dossier de ChromaDB
+        'venv',                # Environnement virtuel (si à la racine)
+        '.git'                 # Dossier Git
+    ]
+    # Convertir en chemins absolus et normalisés pour une comparaison fiable
+    EXCLUDED_ABS_PATHS_NORMALIZED = [
+        os.path.normpath(os.path.join(current_app.root_path, p)) 
+        for p in APP_EXCLUSIONS_RELATIVE_TO_ROOT
+    ]
+    
+    current_app.logger.info(f"Fichiers/Dossiers de l'application à exclure de l'indexation : {EXCLUDED_ABS_PATHS_NORMALIZED}")
+
 
     # S'assurer que les dossiers existent
     if not os.path.exists(kb_dir):
@@ -113,15 +133,36 @@ def _update_vectorstore_from_disk():
     # 1. Charger l'état actuel des documents et des codes sur le disque
     current_files_on_disk = {}
     
+    # Parcourir les documents de la base de connaissances
     for root, _, files in os.walk(kb_dir):
         for file in files:
             file_path = os.path.join(root, file)
+            normalized_file_path = os.path.normpath(file_path)
+            
+            # EXCLUSION: Vérifier si le chemin du fichier ou son répertoire parent est dans la liste des exclusions
+            # Cela exclura si kb_documents/app/ ou kb_documents/run.py
+            if any(normalized_file_path.startswith(excluded_prefix) for excluded_prefix in EXCLUDED_ABS_PATHS_NORMALIZED):
+                current_app.logger.info(f"Exclusion (KB - code application) : {file_path}")
+                continue # Passer ce fichier, il fait partie de l'application
+            
             current_files_on_disk[file_path] = {'mtime': os.path.getmtime(file_path), 'type': 'kb'}
 
+    # Parcourir les documents de la base de code
     for root, dirs, files in os.walk(code_dir):
-        dirs[:] = [d for d in dirs if d != 'chroma_db']
+        # Exclure les sous-dossiers spécifiques à Git, venv, cache, etc. du parcours DANS LE CODEBASE
+        # Ces exclusions sont pour les sous-dossiers trouvés DANS le dossier 'codebase'
+        dirs[:] = [d for d in dirs if d not in ['.git', 'venv', '__pycache__', 'chroma_db']] 
+        
         for file in files:
             file_path = os.path.join(root, file)
+            normalized_file_path = os.path.normpath(file_path)
+            
+            # EXCLUSION: Vérifier si le chemin du fichier ou son répertoire parent est dans la liste des exclusions
+            # Cela exclura si codebase/MonProjetQuiEstEnFaitLAppli/app ou codebase/MonProjet/run.py
+            if any(normalized_file_path.startswith(excluded_prefix) for excluded_prefix in EXCLUDED_ABS_PATHS_NORMALIZED):
+                current_app.logger.info(f"Exclusion (Codebase - code application) : {file_path}")
+                continue # Passer ce fichier, il fait partie de l'application
+
             current_files_on_disk[file_path] = {'mtime': os.path.getmtime(file_path), 'type': 'code'}
 
 
@@ -133,8 +174,12 @@ def _update_vectorstore_from_disk():
 
     # Détection des documents supprimés ou modifiés
     for indexed_path, status_entry in indexed_documents_status.items():
-        if indexed_path not in current_files_on_disk:
-            current_app.logger.info(f"Document supprimé du disque: {indexed_path}. Suppression de ChromaDB et BDD.")
+        # Vérifiez d'abord si le fichier indexé existe toujours sur le disque OU s'il fait partie des exclusions maintenant
+        file_is_on_disk = indexed_path in current_files_on_disk
+        file_is_excluded_now = any(os.path.normpath(indexed_path).startswith(ep) for ep in EXCLUDED_ABS_PATHS_NORMALIZED)
+
+        if not file_is_on_disk or file_is_excluded_now:
+            current_app.logger.info(f"Document supprimé du disque ou maintenant exclu: {indexed_path}. Suppression de ChromaDB et BDD.")
             chunks_to_delete_from_chroma_sources.append(indexed_path)
             db.session.delete(status_entry)
         elif current_files_on_disk[indexed_path]['mtime'] > status_entry.last_modified.timestamp():
@@ -145,7 +190,6 @@ def _update_vectorstore_from_disk():
     # Exécuter les suppressions dans ChromaDB
     if chunks_to_delete_from_chroma_sources:
         try:
-            # CORRECTION ICI: Itérer et supprimer un par un
             for path_source in chunks_to_delete_from_chroma_sources:
                 current_app.logger.info(f"Tentative de suppression de la source: {path_source} de ChromaDB.")
                 _vectorstore.delete(where={"source": path_source})
@@ -180,17 +224,16 @@ def _update_vectorstore_from_disk():
                 project_name = None
                 if file_type == 'code':
                     relative_path = os.path.relpath(file_path, current_app.config['CODE_BASE_DIR'])
-                    # Assurez-vous que le chemin relatif a au moins un composant de répertoire après la base de code
                     path_components = relative_path.split(os.sep)
-                    if len(path_components) > 1: # S'il y a un sous-dossier (le nom du projet)
+                    if len(path_components) > 0:
                         project_name = path_components[0]
                     else:
-                        current_app.logger.warning(f"Fichier de code sans sous-dossier de projet direct dans codebase: {file_path}. Il ne sera pas associé à un projet spécifique.")
-                        file_type = 'kb' # Traiter comme KB si pas de projet
+                        current_app.logger.warning(f"Fichier de code sans sous-dossier de projet direct dans codebase: {file_path}. Il ne sera pas associé à un projet spécifique et indexé comme KB.")
+                        file_type = 'kb'
 
                 for chunk in temp_chunks:
                     chunk.metadata['source'] = file_path
-                    chunk.metadata['file_type'] = file_type # 'kb' ou 'code'
+                    chunk.metadata['file_type'] = file_type
                     if project_name:
                         chunk.metadata['project_name'] = project_name
                     chunks_to_process.append(chunk)
@@ -208,17 +251,7 @@ def _update_vectorstore_from_disk():
 
             except Exception as e:
                 current_app.logger.error(f"Erreur lors de la lecture/traitement de {file_path}: {e}. Ce document sera ignoré.")
-                # Important: Si une erreur se produit ici (lecture/traitement),
-                # on ne veut PAS que ça fasse rollback la transaction entière
-                # et désactive le RAG. On veut juste ignorer CE document.
-                # L'erreur est relancée comme RuntimeError, ce qui est attrapé plus haut.
-                # L'objectif est de ne pas désactiver le RAG pour une seule erreur de fichier.
-                # Cependant, le 'raise RuntimeError' interrompra la boucle et désactivera le RAG.
-                # Pour éviter la désactivation complète, on devrait attraper l'exception ici
-                # et juste loguer, sans relancer.
-                # Retirons le raise RuntimeError ici pour ce bloc.
-                # db.session.rollback() # Le rollback n'est plus nécessaire ici si on ne relance pas l'erreur
-                pass # Laisse l'erreur être gérée par le logger, ne lève plus de RuntimeError ici
+                pass 
 
         if chunks_to_process:
             current_app.logger.info(f"Ajout de {len(chunks_to_process)} nouveaux chunks à ChromaDB.")
