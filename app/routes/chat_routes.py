@@ -1,6 +1,6 @@
 # app/routes/chat_routes.py
 
-import os
+import os # <--- C'EST CETTE LIGNE QUI DOIT ÊTRE PRÉSENTE
 import uuid 
 from flask import render_template, request, jsonify, Blueprint, current_app 
 
@@ -22,21 +22,21 @@ rag_strict_prompt = None
 rag_fallback_prompt = None
 code_analysis_prompt = None
 general_llm_chain = None
-general_llm_prompt_template = None # Déclarée ici pour être globalement accessible
+general_llm_prompt_template = None 
 
-_llm_instances_by_session_id = {} # Dictionnaire pour stocker les instances de LLM par ID de session
+_llm_instances_by_session_id = {}
 
 
 # Cette fonction sera appelée par __init__.py après que tous les services soient prêts
 def initialize_chains_with_app(app_instance):
-    global rag_strict_prompt, rag_fallback_prompt, code_analysis_prompt, general_llm_chain, general_llm_prompt_template # Déclare toutes les variables globales
+    global rag_strict_prompt, rag_fallback_prompt, code_analysis_prompt, general_llm_chain, general_llm_prompt_template
 
-    chat_llm_instance_global = app_instance.extensions["llm_service"]["chat_llm"] # L'instance LLM globale par défaut
+    chat_llm_instance_global = app_instance.extensions["llm_service"]["chat_llm"]
     if chat_llm_instance_global is None:
         app_instance.logger.error("Erreur: Le chat LLM n'est pas initialisé via app.extensions.")
         raise RuntimeError("Chat LLM not initialized for chain creation.")
 
-    _llm_instances_by_session_id['default'] = chat_llm_instance_global
+    _llm_instances_by_session_id['default_global_llm'] = chat_llm_instance_global
 
     rag_strict_prompt = ChatPromptTemplate.from_messages([
         ("system", "En te basant STRICTEMENT et UNIQUEMENT sur le CONTEXTE fourni, réponds à la question de l'utilisateur de manière concise. Si la réponse n'est PAS dans le CONTEXTE, dis CLAIREMENT 'Je ne trouve pas cette information dans les documents fournis.' Ne fabrique pas de réponses."),
@@ -61,13 +61,11 @@ def initialize_chains_with_app(app_instance):
 
     document_chain = create_stuff_documents_chain(chat_llm_instance_global, rag_fallback_prompt)
     
-    # DÉFINITION DE general_llm_prompt_template
     general_llm_prompt_template = ChatPromptTemplate.from_messages([
         ("system", "Vous êtes un assistant IA expert en développement, en codage, et en configurations Linux. Répondez aux questions de manière précise et concise, fournissez des exemples de code si nécessaire. Si vous ne trouvez pas la réponse, dites simplement que vous ne savez pas."),
         ("system", "{chat_history}"),
         ("user", "{input}")
     ])
-    # INITIALISATION DE general_llm_chain (Ligne 65 dans l'erreur Pylance)
     general_llm_chain = general_llm_prompt_template | chat_llm_instance_global
 
     app_instance.logger.info("Chaînes LangChain (prompts RAG et général_llm_chain) initialisées.")
@@ -79,15 +77,13 @@ def index():
     from app.models import Conversation 
     conversations = Conversation.query.order_by(Conversation.timestamp.desc()).all()
     project_names = []
-    # Accédez à la configuration via l'instance 'app' qui est importée globalement
     code_base_dir = app.config.get('CODE_BASE_DIR') 
-    if code_base_dir and os.path.exists(code_base_dir):
+    if code_base_dir and os.path.exists(code_base_dir): # Ligne 71 dans l'erreur
         project_names = [d for d in os.listdir(code_base_dir) if os.path.isdir(os.path.join(code_base_dir, d))]
     
     return render_template('index.html', conversations=conversations, project_names=project_names)
 
 
-# Route pour lister toutes les conversations (GET)
 @chat_bp.route('/conversations', methods=['GET'])
 def get_all_conversations():
     from app.models import Conversation
@@ -95,18 +91,15 @@ def get_all_conversations():
     return jsonify([{'id': conv.id, 'name': conv.name} for conv in conversations])
 
 
-# Route pour la création de conversation (POST)
-# C'EST L'UNIQUE DÉFINITION DE create_conversation (Ligne 94 dans l'erreur Pylance)
 @chat_bp.route('/conversations', methods=['POST'])
 def create_conversation():
     from app.models import Conversation
     data = request.get_json(silent=True) 
-    # Vérification robuste si data est None ou n'est pas un dictionnaire
     if not isinstance(data, dict):
         app.logger.error(f"Requête JSON manquante ou malformée pour créer conversation. Data reçue: {data}")
         return jsonify({'error': 'Requête invalide: JSON manquant ou malformé.'}), 400
 
-    name = data.get('name') # Ligne 108 dans l'erreur Pylance si existante
+    name = data.get('name') 
     if not name:
         app.logger.error("Nom de conversation manquant dans la requête JSON.")
         return jsonify({'error': 'Le nom de la conversation est requis.'}), 400
@@ -115,7 +108,7 @@ def create_conversation():
     if existing_conversations_count >= 3:
         return jsonify({'error': 'Vous ne pouvez pas créer plus de 3 conversations persistantes.'}), 400
 
-    new_conv = Conversation(name=name) # type: ignore [reportCallIssue]
+    new_conv = Conversation(name=name) 
     try:
         db.session.add(new_conv)
         db.session.commit()
@@ -128,29 +121,23 @@ def create_conversation():
 
 @chat_bp.route('/chat', methods=['POST'])
 def chat():
-    # current_conversation_id est géré localement dans la fonction.
     request_data = request.get_json(silent=True)
-    # Vérification robuste si request_data est None ou n'est pas un dictionnaire
     if not isinstance(request_data, dict):
         app.logger.error(f"Requête JSON manquante ou malformée pour chat. Data reçue: {request_data}")
         return jsonify({'response': "Erreur: La requête n'est pas au format JSON valide."}), 400
 
     user_message = request_data.get('message', '')
-    conv_id_from_request = request_data.get('conversation_id')
+    conv_id_from_request = request_data.get('conversation_id') 
     ephemeral_history_from_frontend = request_data.get('ephemeral_history', [])
     rag_mode = request_data.get('rag_mode', 'fallback_rag')
     selected_project = request_data.get('selected_project', None)
     strict_mode = request_data.get('strict_mode', False)
 
-    # Déterminez le chat_llm_instance à utiliser pour cette requête
     chat_llm_instance_for_current_request = None
     final_chat_history_for_llm = []
-    
-    # Déterminez la clé de session unique pour cette conversation (pour l'API du LLM)
-    session_key = "default_session" # Clé par défaut, sera surchargée
+    session_key = "default_ephemeral_session_key" 
 
-    if conv_id_from_request == "new_ephemeral":
-        # Générer un UUID unique pour la nouvelle conversation éphémère
+    if conv_id_from_request == "new_ephemeral_session_request":
         session_key = str(uuid.uuid4())
         app.logger.info(f"Mode 'Nouvelle Conversation Éphémère': Nouvelle session_key générée: {session_key}")
         final_chat_history_for_llm = [] 
@@ -164,12 +151,11 @@ def chat():
         )
         _llm_instances_by_session_id[session_key] = chat_llm_instance_for_current_request
 
-    elif conv_id_from_request:
+    elif isinstance(conv_id_from_request, int):
         try:
-            conversation_id_int = int(conv_id_from_request)
-            session_key = str(conversation_id_int) 
-            app.logger.info(f"Conversation persistante ID: {conversation_id_int}. Chargement de l'historique.")
-            final_chat_history_for_llm = load_conversation_history(conversation_id_int)
+            session_key = str(conv_id_from_request)
+            app.logger.info(f"Conversation persistante ID: {session_key}. Chargement de l'historique.")
+            final_chat_history_for_llm = load_conversation_history(conv_id_from_request)
             
             if session_key not in _llm_instances_by_session_id:
                 chat_llm_instance_for_current_request = ChatOpenAI(
@@ -197,8 +183,8 @@ def chat():
             _llm_instances_by_session_id[session_key] = chat_llm_instance_for_current_request
 
     else: 
-        session_key = 'default_ephemeral_session'
-        app.logger.info("Conv_ID manquant ou invalide. Traitement comme éphémère avec historique frontend.")
+        session_key = 'initial_default_ephemeral_session'
+        app.logger.info("Conv_ID manquant ou non-UUID/int. Traitement comme session éphémère par défaut.")
         
         if session_key not in _llm_instances_by_session_id:
              chat_llm_instance_for_current_request = ChatOpenAI(
@@ -244,51 +230,48 @@ def chat():
         use_rag_processing = False
         retrieved_docs = []
         selected_prompt = None
-        filtered_retriever = None
+        
+        # DÉBUT LOGIQUE DE DÉCISION DU RETRIEVER ET DU FILTRE
+        retriever_to_use = None 
+        filter_applied_log = "Aucun filtre de métadonnées." 
 
-        if current_vectorstore and current_retriever:
+        if current_vectorstore and current_retriever: 
             app.logger.info(f"DEBUG RAG: Question utilisateur: '{user_message}' (Mode: {rag_mode}, Projet: {selected_project}, Strict: {strict_mode}, Session: {session_key})")
             print(f"PRINT DEBUG RAG: Question utilisateur: '{user_message}' (Mode: {rag_mode}, Projet: {selected_project}, Strict: {strict_mode}, Session: {session_key})")
 
-            metadata_filter = {}
+            metadata_filter_dict = {} 
 
             if rag_mode == 'kb_rag':
-                metadata_filter = {"file_type": "kb"}
+                metadata_filter_dict = {"file_type": {"$eq": "kb"}}
                 selected_prompt = rag_strict_prompt if strict_mode else rag_fallback_prompt
+                filter_applied_log = f"Filtre KB: {metadata_filter_dict}"
                 
             elif rag_mode == 'code_rag':
                 if selected_project:
-                    metadata_filter = {
+                    metadata_filter_dict = {
                         "$and": [
                             {"file_type": {"$eq": "code"}},
                             {"project_name": {"$eq": selected_project}}
                         ]
                     }
                     selected_prompt = code_analysis_prompt
+                    filter_applied_log = f"Filtre Code: {metadata_filter_dict}"
                 else:
                     response_content = "Veuillez sélectionner un projet pour le mode d'analyse de code."
                     app.logger.warning("Mode analyse de code sélectionné sans projet.")
                     print("PRINT DEBUG: Mode analyse de code sélectionné sans projet.")
                     return jsonify({'response': response_content})
             
-            retriever_to_use = None
-            if metadata_filter and rag_mode != 'general':
+            if rag_mode != 'general': 
                 try:
-                    filtered_retriever = current_vectorstore.as_retriever(search_kwargs={"k": 10, "filter": metadata_filter})
-                    retriever_to_use = filtered_retriever
-                    app.logger.info(f"DEBUG RAG: Utilisation du retriever filtré avec filtre: {metadata_filter}")
-                except Exception as filter_e:
-                    app.logger.error(f"Erreur lors de la création du retriever filtré: {filter_e}")
-                    import traceback
-                    app.logger.error(f"TRACEBACK RETRIEVER FILTER ERROR: \n{traceback.format_exc()}")
-                    response_content = "Désolé, il y a eu un problème avec le filtre de documents du RAG. Réessayez."
-                    app.logger.info("DEBUG RAG: Fallback suite erreur filtre.")
-            elif rag_mode != 'general':
-                retriever_to_use = current_retriever
-                app.logger.info("DEBUG RAG: Utilisation du retriever global (non filtré).")
-
-            if retriever_to_use:
-                try:
+                    if metadata_filter_dict: 
+                        k_value = 10 if rag_mode == 'code_rag' else 5
+                        retriever_to_use = current_vectorstore.as_retriever(search_kwargs={"k": k_value, "filter": metadata_filter_dict})
+                        app.logger.info(f"DEBUG RAG: Utilisation du retriever filtré avec filtre: {filter_applied_log}")
+                    else: 
+                        retriever_to_use = current_retriever 
+                        app.logger.warning("DEBUG RAG: Mode RAG sélectionné mais pas de filtre de métadonnées appliqué (possible erreur logique ou données). Utilisation du retriever global.")
+                    
                     retrieved_docs = retriever_to_use.invoke(user_message)
                     if len(retrieved_docs) > 0:
                         use_rag_processing = True
@@ -298,16 +281,17 @@ def chat():
                         source_info = doc.metadata.get('source', 'N/A') if isinstance(doc.metadata, dict) else 'N/A'
                         app.logger.info(f"  Doc {i+1} (Source: {source_info}): '{doc.page_content[:100]}...'")
                         print(f"PRINT DEBUG RAG:   Doc {i+1} (Source: {source_info}): '{doc.page_content[:100]}...'")
+
                 except Exception as invoke_e:
                     app.logger.error(f"Erreur lors de l'invocation du retriever: {invoke_e}")
                     import traceback
                     app.logger.error(f"TRACEBACK RETRIEVER INVOKE ERROR: \n{traceback.format_exc()}")
                     response_content = "Désolé, une erreur est survenue lors de la recherche de documents pertinents."
                     app.logger.info("DEBUG RAG: Fallback suite erreur invocation retriever.")
-            else:
-                app.logger.info("DEBUG RAG: Pas de retriever à utiliser pour ce mode ou pas de documents trouvés.")
-                print("PRINT DEBUG RAG: Pas de retriever à utiliser pour ce mode ou pas de documents trouvés.")
-        
+            else: 
+                app.logger.info("DEBUG RAG: Mode Général ou RAG non initialisé. Pas de recherche de documents via retriever.")
+                print("PRINT DEBUG RAG: Mode Général ou RAG non initialisé. Pas de recherche de documents via retriever.")
+
         if use_rag_processing and response_content == "Désolé, une erreur inattendue est survenue lors de la génération de la réponse.":
             print("PRINT DEBUG RAG: Documents pertinents trouvés. Utilisation du RAG.")
             app.logger.info("DEBUG RAG: Utilisation du RAG.")
@@ -319,8 +303,8 @@ def chat():
 
             dynamic_document_chain = create_stuff_documents_chain(chat_llm_instance_for_chain, selected_prompt) # type: ignore [reportCallIssue]
 
-            final_rag_chain_retriever = filtered_retriever if filtered_retriever else current_retriever
-
+            final_rag_chain_retriever = retriever_to_use 
+            
             chain_inputs = {
                 "input": user_message,
                 "chat_history": temp_memory.load_memory_variables({})["chat_history"]
@@ -390,11 +374,13 @@ def chat():
             response_content = "Désolé, une erreur interne est survenue lors de la génération de la réponse (format inattendu)."
 
         # Logique de sauvegarde des messages
-        if isinstance(conv_id_from_request, int): # Utilisez conv_id_from_request pour la sauvegarde
+        if isinstance(conv_id_from_request, int): 
             save_message(conv_id_from_request, "user", user_message)
             save_message(conv_id_from_request, "bot", response_content)
-        else:
-            app.logger.info("Conversation éphémère, messages non sauvegardés en base de données.")
+        elif isinstance(conv_id_from_request, str) and len(conv_id_from_request) == 36 and conv_id_from_request.count('-') == 4:
+            app.logger.info(f"Conversation éphémère (ID: {conv_id_from_request}), messages non sauvegardés en base de données.")
+        else: 
+            app.logger.info(f"Conversation éphémère (ID: {conv_id_from_request}), messages non sauvegardés en base de données.")
 
 
         return jsonify({'response': response_content})

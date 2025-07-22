@@ -1,6 +1,9 @@
 // app/static/js/script.js
 
-let currentConversationId = "new_ephemeral"; // ID de la conversation active ("new_ephemeral" pour éphémère)
+// currentConversationId sera soit un ID numérique (pour conversation persistante),
+// soit un UUID (string) pour une session éphémère continue,
+// soit null pour le tout premier chargement/interaction de la page.
+let currentConversationId = null; 
 let ephemeralChatHistory = []; // Historique de la conversation éphémère (stocké côté client)
 
 // Récupération des éléments du DOM
@@ -20,7 +23,6 @@ const projectSelect = document.getElementById('project-select');
 const strictModeCheckbox = document.getElementById('strict-mode-checkbox');
 
 
-// Fonction pour afficher un message dans la boîte de chat AVEC RENDU MARKDOWN
 // Fonction pour afficher un message dans la boîte de chat AVEC RENDU MARKDOWN ET BOUTON COPIER
 function displayMessage(sender, content) {
     const messageDiv = document.createElement('div');
@@ -79,44 +81,66 @@ function displayMessage(sender, content) {
     chatBox.appendChild(messageDiv);
     chatBox.scrollTop = chatBox.scrollHeight;
 
-    if (currentConversationId === "new_ephemeral") {
+    // Mise à jour de l'historique éphémère SI la conversation active est bien une session éphémère (string UUID ou null)
+    if (typeof currentConversationId === 'string' || currentConversationId === null) {
         ephemeralChatHistory.push({ sender: sender, content: content });
     }
 }
 
 // Charge et affiche les messages d'une conversation spécifique (persistante ou éphémère)
 async function loadConversation(convId) {
-    currentConversationId = convId;
-    chatBox.innerHTML = '';
+    chatBox.innerHTML = ''; // Vider la boîte de chat visible
 
+    // Mise à jour de l'état visuel du bouton de conversation actif dans la barre latérale
     document.querySelectorAll('#conversation-list button').forEach(btn => btn.classList.remove('active'));
     if (ephemeralConvBtn) ephemeralConvBtn.classList.remove('active');
     
-    ephemeralChatHistory = []; 
-
-    if (convId === "new_ephemeral") {
+    // 1. Gérer l'ID de la conversation et réinitialiser l'historique interne du frontend
+    if (convId === "new_ephemeral_session_request") { 
+        // Demande de nouvelle session éphémère via le bouton. Générer un nouvel UUID.
+        currentConversationId = crypto.randomUUID(); // Génère un UUID unique (compatible navigateur moderne)
+        ephemeralChatHistory = []; // Vider l'historique pour la nouvelle session
+        console.log("Nouvelle session éphémère Frontend ID:", currentConversationId);
         if (ephemeralConvBtn) ephemeralConvBtn.classList.add('active');
-        displayMessage('bot', 'Nouvelle conversation éphémère activée.');
+        displayMessage('bot', `Nouvelle conversation éphémère active (ID: ${currentConversationId.substring(0, 8)}...).`);
     } else {
-        const activeBtn = document.querySelector(`#conversation-list button[data-id="${convId}"]`);
-        if (activeBtn) activeBtn.classList.add('active');
+        // C'est un ID de conversation persistante, ou la toute première requête où currentConversationId est null.
+        // Si c'est une persistante, l'ID est numérique. Si c'est null, cela deviendra une session éphémère.
+        currentConversationId = convId; // Assigner l'ID passé
+        ephemeralChatHistory = []; // Vider l'historique éphémère lors du changement vers/depuis une persistante
+        
+        // Si l'ID est un ID de conversation persistante (numérique)
+        if (typeof currentConversationId === 'number') { 
+            const activeBtn = document.querySelector(`#conversation-list button[data-id="${currentConversationId}"]`);
+            if (activeBtn) activeBtn.classList.add('active');
 
-        loadingIndicator.style.display = 'block';
-        try {
-            const response = await fetch(`/conversations/${convId}`);
-            if (!response.ok) {
-                throw new Error(`Erreur HTTP: ${response.status}`);
+            loadingIndicator.style.display = 'block';
+            try {
+                const response = await fetch(`/conversations/${currentConversationId}`);
+                if (!response.ok) {
+                    throw new Error(`Erreur HTTP: ${response.status}`);
+                }
+                const messages = await response.json();
+                messages.forEach(msg => displayMessage(msg.sender, msg.content));
+            } catch (error) {
+                console.error('Erreur lors du chargement de la conversation:', error);
+                displayMessage('bot', 'Erreur lors du chargement de cette conversation.');
+            } finally {
+                loadingIndicator.style.display = 'none';
             }
-            const messages = await response.json();
-            messages.forEach(msg => displayMessage(msg.sender, msg.content));
-        } catch (error) {
-            console.error('Erreur lors du chargement de la conversation:', error);
-            displayMessage('bot', 'Erreur lors du chargement de cette conversation.');
-        } finally {
-            loadingIndicator.style.display = 'none';
+        } else { // Si c'est une session éphémère (null au départ ou un UUID existant)
+            if (ephemeralConvBtn) ephemeralConvBtn.classList.add('active');
+            ephemeralChatHistory.forEach(msg => displayMessage(msg.sender, msg.content)); // Réafficher l'historique existant de cette session éphémère
+            if (currentConversationId === null) {
+                // Si c'est le tout début et que currentConversationId est null, on lui assigne un UUID
+                currentConversationId = crypto.randomUUID();
+                console.log("Session éphémère initiale auto-générée ID:", currentConversationId);
+                displayMessage('bot', `Conversation éphémère active (ID: ${currentConversationId.substring(0, 8)}...).`);
+            }
         }
     }
 }
+
 
 // Récupère et affiche la liste des conversations persistantes depuis le backend
 async function fetchConversations() {
@@ -187,7 +211,7 @@ if (newConvBtn) {
 // Gère le basculement vers une nouvelle conversation éphémère
 if (ephemeralConvBtn) {
     ephemeralConvBtn.onclick = () => {
-        loadConversation("new_ephemeral");
+        loadConversation("new_ephemeral_session_request"); // Demande une nouvelle session éphémère avec un UUID frais
     };
 }
 
@@ -198,7 +222,7 @@ async function deleteConversation(convId) {
         if (response.ok) {
             await fetchConversations();
             if (currentConversationId === convId) {
-                loadConversation("new_ephemeral");
+                loadConversation("new_ephemeral_session_request"); // Bascule vers une nouvelle éphémère si la conversation active est supprimée
             } else {
                 displayMessage('bot', 'Conversation supprimée.');
             }
@@ -246,7 +270,8 @@ sendButton.onclick = async () => {
     loadingIndicator.style.display = 'block';
 
     let historyToSend = [];
-    if (currentConversationId === "new_ephemeral") { 
+    // N'envoyer l'historique que si currentConversationId est un string (UUID éphémère) ou null (première requête)
+    if (typeof currentConversationId === 'string' || currentConversationId === null) { 
         historyToSend = ephemeralChatHistory.map(msg => ({
             sender: msg.sender,
             content: msg.content
@@ -289,16 +314,18 @@ sendButton.onclick = async () => {
     try {
         let requestBody = {
             message: message,
+            // conversation_id sera l'UUID éphémère (string) ou l'ID numérique (int)
             conversation_id: currentConversationId, 
             rag_mode: ragModeParam,
             selected_project: selectedProject,
             strict_mode: strictModeCheckbox ? strictModeCheckbox.checked : false 
         };
 
-        if (currentConversationId === "new_ephemeral") {
+        // Si currentConversationId est un string (UUID) ou null, inclure l'historique éphémère
+        if (typeof currentConversationId === 'string' || currentConversationId === null) {
             requestBody.ephemeral_history = historyToSend;
         }
-
+        
         const response = await fetch('/chat', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -326,14 +353,15 @@ sendButton.onclick = async () => {
 
         displayMessage('bot', data.response);
 
-        if (currentConversationId === "new_ephemeral") {
+        // Si c'est une conversation éphémère (UUID ou null), ajouter la réponse du bot à ephemeralChatHistory
+        if (typeof currentConversationId === 'string' || currentConversationId === null) {
             ephemeralChatHistory.push({ sender: 'bot', content: data.response });
         }
 
     } catch (error) {
         console.error('Erreur lors de l\'envoi du message:', error);
         displayMessage('bot', `Désolé, une erreur est survenue lors de la communication. Détails : ${error.message || error}.`);
-        if (currentConversationId === "new_ephemeral") {
+        if (typeof currentConversationId === 'string' || currentConversationId === null) {
             ephemeralChatHistory.push({ sender: 'bot', content: 'Erreur.' });
         }
     } finally {
@@ -355,8 +383,9 @@ userInput.addEventListener('keydown', function(e) {
 
 document.addEventListener('DOMContentLoaded', () => {
     fetchConversations();
-    loadConversation("new_ephemeral"); 
+    loadConversation("new_ephemeral"); // Au démarrage, activer la conversation éphémère par défaut, ce qui va aussi vider l'historique éphémère.
 
+    // Initialiser l'état d'affichage du sélecteur de projet et de la checkbox strict
     const initialSearchMode = document.querySelector('input[name="search_mode"]:checked')?.value || 'general';
 
     if (projectSelectionDiv) {

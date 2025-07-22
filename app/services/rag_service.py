@@ -3,7 +3,7 @@
 import os
 from flask import current_app
 from langchain_community.vectorstores import Chroma
-from langchain_community.document_loaders import TextLoader, PyPDFLoader
+from langchain_community.document_loaders import TextLoader, PyPDFLoader, UnstructuredWordDocumentLoader, UnstructuredODTLoader # NOUVEAUX IMPORTS
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from app.models import DocumentStatus
 from app import db
@@ -17,18 +17,36 @@ _retriever = None
 
 # FONCTION UTILITAIRE : Détermine le type de document et le charge
 def _load_document(file_path):
-    """Charge un document en fonction de son extension."""
-    if file_path.endswith('.txt'):
-        return TextLoader(file_path, encoding='utf-8').load()
-    elif file_path.endswith('.pdf'):
-        return PyPDFLoader(file_path).load()
-    # NOUVEAU: Ajoutez d'autres extensions de code ici
-    elif file_path.endswith(('.py', '.js', '.java', '.cpp', '.c', '.php', '.html', '.css', '.sql', '.json', '.xml', '.yml', '.md')):
-        # Pour les fichiers de code, utilisez TextLoader
-        return TextLoader(file_path, encoding='utf-8').load()
-    else:
-        current_app.logger.warning(f"Type de fichier non supporté, ignoré: {file_path}")
-        return []
+    """
+    Charge un document en fonction de son extension ou tente de le charger comme texte brut.
+    Retourne une liste de documents (LangChain Document) ou une liste vide si le chargement échoue.
+    """
+    current_app.logger.info(f"Tentative de chargement du fichier : {file_path}")
+    
+    file_extension = os.path.splitext(file_path)[1].lower() # Obtient l'extension et la met en minuscules
+
+    try:
+        if file_extension == '.pdf':
+            docs = PyPDFLoader(file_path).load()
+            current_app.logger.info(f"Chargé comme PDF : {file_path}")
+            return docs
+        elif file_extension == '.docx':
+            docs = UnstructuredWordDocumentLoader(file_path).load()
+            current_app.logger.info(f"Chargé comme DOCX : {file_path}")
+            return docs
+        elif file_extension == '.odt':
+            docs = UnstructuredODTLoader(file_path).load()
+            current_app.logger.info(f"Chargé comme ODT : {file_path}")
+            return docs
+        else: # Pour tous les autres fichiers (texte, code, etc.)
+            loader = TextLoader(file_path, encoding='utf-8', autodetect_encoding=True) 
+            docs = loader.load()
+            current_app.logger.info(f"Chargé comme texte brut : {file_path}")
+            return docs
+    except Exception as e:
+        current_app.logger.warning(f"Impossible de charger '{file_path}' (extension '{file_extension}') : {e}. Fichier ignoré.")
+        current_app.logger.warning("Cela peut être dû à un format non pris en charge, un fichier corrompu ou un problème d'encodage/dépendance (ex: LibreOffice pour .odt).")
+        return [] # Retourne vide si le fichier n'est pas lisible ou s'il y a une erreur de chargement
 
 # Fonction pour initialiser le Vector Store et le Retriever
 def initialize_vectorstore():
@@ -75,7 +93,7 @@ def initialize_vectorstore():
             current_app.logger.info("Vector Store vide après ingestion. RAG sera désactivé temporairement.")
             _retriever = None
     else:
-        current_app.logger.error("Le Vector Store n'a pas pu être initialisé. Le RAG sera désactivé.")
+        current_app.logger.error("Le Vector Store n'a pas put être initialisé. Le RAG sera désactivé.")
         _retriever = None
 
 # Fonction interne pour le traitement incrémental des documents
@@ -96,7 +114,6 @@ def _update_vectorstore_from_disk():
     code_dir = current_app.config['CODE_BASE_DIR']
     
     # NOUVEAU: Définir les chemins de l'application elle-même pour EXCLUSION STRICTE
-    # Ces chemins sont relatifs à current_app.root_path, qui est la racine de votre projet.
     APP_EXCLUSIONS_RELATIVE_TO_ROOT = [
         'app',                 # Le dossier 'app' de votre chatbot
         'run.py',              # Le fichier run.py à la racine
@@ -109,7 +126,6 @@ def _update_vectorstore_from_disk():
         'venv',                # Environnement virtuel (si à la racine)
         '.git'                 # Dossier Git
     ]
-    # Convertir en chemins absolus et normalisés pour une comparaison fiable
     EXCLUDED_ABS_PATHS_NORMALIZED = [
         os.path.normpath(os.path.join(current_app.root_path, p)) 
         for p in APP_EXCLUSIONS_RELATIVE_TO_ROOT
@@ -133,35 +149,30 @@ def _update_vectorstore_from_disk():
     # 1. Charger l'état actuel des documents et des codes sur le disque
     current_files_on_disk = {}
     
-    # Parcourir les documents de la base de connaissances
+    # Parcourir les documents de la base de connaissances (kb_documents)
     for root, _, files in os.walk(kb_dir):
         for file in files:
             file_path = os.path.join(root, file)
             normalized_file_path = os.path.normpath(file_path)
             
-            # EXCLUSION: Vérifier si le chemin du fichier ou son répertoire parent est dans la liste des exclusions
-            # Cela exclura si kb_documents/app/ ou kb_documents/run.py
-            if any(normalized_file_path.startswith(excluded_prefix) for excluded_prefix in EXCLUDED_ABS_PATHS_NORMALIZED):
+            if any(normalized_file_path.startswith(ep) for ep in EXCLUDED_ABS_PATHS_NORMALIZED):
                 current_app.logger.info(f"Exclusion (KB - code application) : {file_path}")
-                continue # Passer ce fichier, il fait partie de l'application
+                continue
             
             current_files_on_disk[file_path] = {'mtime': os.path.getmtime(file_path), 'type': 'kb'}
 
-    # Parcourir les documents de la base de code
+    # Parcourir les documents de la base de code (codebase)
     for root, dirs, files in os.walk(code_dir):
         # Exclure les sous-dossiers spécifiques à Git, venv, cache, etc. du parcours DANS LE CODEBASE
-        # Ces exclusions sont pour les sous-dossiers trouvés DANS le dossier 'codebase'
         dirs[:] = [d for d in dirs if d not in ['.git', 'venv', '__pycache__', 'chroma_db']] 
         
         for file in files:
             file_path = os.path.join(root, file)
             normalized_file_path = os.path.normpath(file_path)
             
-            # EXCLUSION: Vérifier si le chemin du fichier ou son répertoire parent est dans la liste des exclusions
-            # Cela exclura si codebase/MonProjetQuiEstEnFaitLAppli/app ou codebase/MonProjet/run.py
-            if any(normalized_file_path.startswith(excluded_prefix) for excluded_prefix in EXCLUDED_ABS_PATHS_NORMALIZED):
+            if any(normalized_file_path.startswith(ep) for ep in EXCLUDED_ABS_PATHS_NORMALIZED):
                 current_app.logger.info(f"Exclusion (Codebase - code application) : {file_path}")
-                continue # Passer ce fichier, il fait partie de l'application
+                continue
 
             current_files_on_disk[file_path] = {'mtime': os.path.getmtime(file_path), 'type': 'code'}
 
@@ -174,7 +185,6 @@ def _update_vectorstore_from_disk():
 
     # Détection des documents supprimés ou modifiés
     for indexed_path, status_entry in indexed_documents_status.items():
-        # Vérifiez d'abord si le fichier indexé existe toujours sur le disque OU s'il fait partie des exclusions maintenant
         file_is_on_disk = indexed_path in current_files_on_disk
         file_is_excluded_now = any(os.path.normpath(indexed_path).startswith(ep) for ep in EXCLUDED_ABS_PATHS_NORMALIZED)
 
@@ -199,7 +209,7 @@ def _update_vectorstore_from_disk():
             current_app.logger.error(f"Erreur lors de la suppression de documents de ChromaDB: {e}")
             current_app.logger.error("ChromaDB peut être corrompu ou les métadonnées de source ne correspondent pas.")
             db.session.rollback()
-            raise RuntimeError(f"Échec critique de la suppression ChromaDB: {e}. Ré-ingestion complète nécessaire.")
+            raise RuntimeError(f"Échec critique de l'ajout à ChromaDB: {e}. Ré-ingestion complète nécessaire.")
 
 
     # Détection des nouveaux documents
@@ -215,28 +225,29 @@ def _update_vectorstore_from_disk():
             try:
                 loaded_docs = _load_document(file_path)
                 if not loaded_docs:
-                    continue
+                    continue # Passe au fichier suivant si non supporté ou erreur de chargement
 
-                text_splitter = RecursiveCharacterTextSplitter(chunk_size=2000, chunk_overlap=200)
-                temp_chunks = text_splitter.split_documents(loaded_docs)
-                
-                file_type = current_files_on_disk[file_path]['type']
-                project_name = None
-                if file_type == 'code':
-                    relative_path = os.path.relpath(file_path, current_app.config['CODE_BASE_DIR'])
-                    path_components = relative_path.split(os.sep)
-                    if len(path_components) > 0:
-                        project_name = path_components[0]
-                    else:
-                        current_app.logger.warning(f"Fichier de code sans sous-dossier de projet direct dans codebase: {file_path}. Il ne sera pas associé à un projet spécifique et indexé comme KB.")
-                        file_type = 'kb'
-
-                for chunk in temp_chunks:
-                    chunk.metadata['source'] = file_path
-                    chunk.metadata['file_type'] = file_type
-                    if project_name:
-                        chunk.metadata['project_name'] = project_name
-                    chunks_to_process.append(chunk)
+                file_size_bytes = os.path.getsize(file_path)
+                # Décision de chunking basée sur la taille du fichier (environ 5000 caractères = 5KB)
+                if file_size_bytes <= 5000: # Pour les petits documents (< environ 5KB)
+                    current_app.logger.info(f"Fichier petit (<5KB): {file_path}. Traitement comme un seul chunk.")
+                    # Chaque document (chargé par _load_document) est déjà un objet Document.
+                    # Pour un seul chunk par fichier, pas besoin de splitter, juste d'ajouter les métadonnées.
+                    for doc in loaded_docs:
+                        # Assurez-vous que les métadonnées existantes du loader sont conservées
+                        # et ajoutez les nôtres.
+                        doc.metadata = doc.metadata or {} # S'assurer que metadata est un dict
+                        _add_hierarchical_metadata(doc, file_path, current_files_on_disk[file_path]['type'])
+                        chunks_to_process.append(doc)
+                else: # Pour les documents plus grands (> environ 5KB)
+                    current_app.logger.info(f"Fichier grand (>=5KB): {file_path}. Chunking par 1000 caractères.")
+                    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200) # chunk_size 1000, overlap 200
+                    temp_chunks = text_splitter.split_documents(loaded_docs)
+                    
+                    for chunk in temp_chunks:
+                        chunk.metadata = chunk.metadata or {} # S'assurer que metadata est un dict
+                        _add_hierarchical_metadata(chunk, file_path, current_files_on_disk[file_path]['type'])
+                        chunks_to_process.append(chunk)
 
                 mtime = os.path.getmtime(file_path)
                 timestamp_mtime = datetime.datetime.fromtimestamp(mtime)
@@ -269,6 +280,36 @@ def _update_vectorstore_from_disk():
     else:
        current_app.logger.info("Aucun nouveau document ou modification détectée.")
 
+
+# --- NOUVELLE FONCTION : AJOUTE LES MÉTA-DONNÉES HIÉRARCHIQUES ---
+def _add_hierarchical_metadata(doc, file_path, file_type):
+    """Ajoute les métadonnées de dossier et de nom de fichier/titre au chunk."""
+    # Nettoie le chemin de base pour le calcul du chemin relatif
+    base_dir = current_app.config['KNOWLEDGE_BASE_DIR'] if file_type == 'kb' else current_app.config['CODE_BASE_DIR']
+    
+    relative_path = os.path.relpath(file_path, base_dir)
+    path_components = relative_path.split(os.sep) # Sépare le chemin en ses composants
+
+    # Ajoute les noms de dossier comme metadata_level_X
+    # Limitez le nombre de niveaux pour ne pas surcharger inutilement
+    MAX_FOLDER_LEVELS = 3 # Maximum 3 niveaux de dossier (Client/Projet/TypeDoc)
+
+    for i, component in enumerate(path_components[:-1]): # Exclut le nom du fichier lui-même
+        if i < MAX_FOLDER_LEVELS:
+            doc.metadata[f'folder_level_{i+1}'] = component
+        if i == len(path_components) - 2: # C'est le dernier dossier
+            doc.metadata['last_folder_name'] = component
+
+    doc.metadata['file_name'] = os.path.basename(file_path) # Le nom du fichier
+    doc.metadata['document_path_relative'] = relative_path # Chemin relatif complet
+    doc.metadata['file_type'] = file_type # Conserve le type 'kb' ou 'code'
+    
+    # Pour le 'document_title', si le loader Unstructured a déjà trouvé un titre, le conserver.
+    # Sinon, utiliser le nom du fichier (sans extension) comme titre par défaut.
+    if 'title' not in doc.metadata or not doc.metadata['title']: # 'title' est une clé standard de LangChain/Unstructured
+        doc.metadata['document_title'] = os.path.splitext(os.path.basename(file_path))[0]
+    else:
+        doc.metadata['document_title'] = doc.metadata['title'] # Utilise le titre extrait par Unstructured
 
 # --- Fonctions pour accéder aux instances du Vector Store et du Retriever après leur initialisation ---
 def get_vectorstore():
