@@ -1,19 +1,40 @@
 # app/services/rag_service.py
 
 import os
+import datetime
+import shutil
+import traceback # Ajout pour les traces d'erreur
+
 from flask import current_app
 from langchain_community.vectorstores import Chroma
-from langchain_community.document_loaders import TextLoader, PyPDFLoader, UnstructuredWordDocumentLoader, UnstructuredODTLoader # NOUVEAUX IMPORTS
+from langchain_community.document_loaders import TextLoader, PyPDFLoader, UnstructuredWordDocumentLoader, UnstructuredODTLoader, UnstructuredExcelLoader 
+# from langchain_community.document_loaders.ods import UnstructuredODSLoader # Ligne commentée pour éviter l'ImportError
 from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_core.documents import Document # <-- NOUVEL IMPORT NÉCESSAIRE POUR CRÉER DES OBJETS DOCUMENT
+
 from app.models import DocumentStatus
 from app import db
 from app.services.llm_service import get_embeddings_llm
-import datetime
-import shutil
+
 
 # Variables globales pour le vector store et le retriever (initialisées par initialize_vectorstore())
 _vectorstore = None
 _retriever = None
+
+# Liste des extensions de fichiers à ignorer explicitement (médias, binaires, etc.)
+# Cette liste peut être étendue selon les besoins
+EXCLUDED_EXTENSIONS = {
+    '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp', # Images
+    '.mp3', '.wav', '.ogg', '.flac', '.aac', # Audio
+    '.mp4', '.avi', '.mov', '.wmv', '.flv', '.mkv', # Vidéo
+    '.zip', '.tar', '.gz', '.rar', '.7z', # Archives
+    '.exe', '.dll', '.bin', '.dat', '.so', '.dylib', # Exécutables et bibliothèques
+    '.ico', '.db', '.sqlite', '.log', '.bak', '.tmp', # Divers
+    '.psd', '.ai', '.eps', # Fichiers Adobe
+    '.svg', # Images vectorielles (peuvent contenir du code, mais souvent visuelles)
+    '.json', '.xml', '.yml', '.yaml', '.csv', '.tsv', # Fichiers de données structurées (souvent texte, mais à double tranchant)
+    # Ajoutez d'autres extensions si nécessaire
+}
 
 # FONCTION UTILITAIRE : Détermine le type de document et le charge
 def _load_document(file_path):
@@ -24,6 +45,11 @@ def _load_document(file_path):
     current_app.logger.info(f"Tentative de chargement du fichier : {file_path}")
     
     file_extension = os.path.splitext(file_path)[1].lower() # Obtient l'extension et la met en minuscules
+
+    # Ajout d'une vérification explicite pour ignorer les types de fichiers non textuels/code
+    if file_extension in EXCLUDED_EXTENSIONS:
+        current_app.logger.info(f"Fichier ignoré (extension non-texte/code explicite) : {file_path}")
+        return [] # Retourne vide pour ignorer le fichier
 
     try:
         if file_extension == '.pdf':
@@ -38,10 +64,22 @@ def _load_document(file_path):
             docs = UnstructuredODTLoader(file_path).load()
             current_app.logger.info(f"Chargé comme ODT : {file_path}")
             return docs
-        else: # Pour tous les autres fichiers (texte, code, etc.)
-            loader = TextLoader(file_path, encoding='utf-8', autodetect_encoding=True) 
+        # Gérer les fichiers Excel (.xlsx)
+        elif file_extension == '.xlsx':
+            docs = UnstructuredExcelLoader(file_path).load()
+            current_app.logger.info(f"Chargé comme XLSX : {file_path}")
+            return docs
+        # La ligne suivante pour .ods est commentée pour éviter l'ImportError
+        # Si vous avez absolument besoin de charger les .ods, il faudra trouver le chemin d'importation exact
+        # ou envisager une autre approche/bibliothèque.
+        # elif file_extension == '.ods': 
+        #     docs = UnstructuredODSLoader(file_path).load()
+        #     current_app.logger.info(f"Chargé comme ODS : {file_path}")
+        #     return docs
+        else: # Pour tous les autres fichiers (texte, code, etc.), y compris .ods temporairement
+            loader = TextLoader(file_path, encoding='utf-8', autodetect_encoding=True)
             docs = loader.load()
-            current_app.logger.info(f"Chargé comme texte brut : {file_path}")
+            current_app.logger.info(f"Chargé comme texte brut (code/texte) : {file_path}")
             return docs
     except Exception as e:
         current_app.logger.warning(f"Impossible de charger '{file_path}' (extension '{file_extension}') : {e}. Fichier ignoré.")
@@ -87,7 +125,7 @@ def initialize_vectorstore():
 
     if _vectorstore is not None:
         if _vectorstore._collection.count() > 0:
-            _retriever = _vectorstore.as_retriever(search_kwargs={"k": 10})
+            _retriever = _vectorstore.as_retriever(search_kwargs={"k": 5}) # MODIFIÉ : Réduit k à 5
             current_app.logger.info("Vector Store (RAG) initialisé et Retriever prêt.")
         else:
             current_app.logger.info("Vector Store vide après ingestion. RAG sera désactivé temporairement.")
@@ -228,26 +266,85 @@ def _update_vectorstore_from_disk():
                     continue # Passe au fichier suivant si non supporté ou erreur de chargement
 
                 file_size_bytes = os.path.getsize(file_path)
-                # Décision de chunking basée sur la taille du fichier (environ 5000 caractères = 5KB)
-                if file_size_bytes <= 5000: # Pour les petits documents (< environ 5KB)
-                    current_app.logger.info(f"Fichier petit (<5KB): {file_path}. Traitement comme un seul chunk.")
-                    # Chaque document (chargé par _load_document) est déjà un objet Document.
-                    # Pour un seul chunk par fichier, pas besoin de splitter, juste d'ajouter les métadonnées.
-                    for doc in loaded_docs:
-                        # Assurez-vous que les métadonnées existantes du loader sont conservées
-                        # et ajoutez les nôtres.
-                        doc.metadata = doc.metadata or {} # S'assurer que metadata est un dict
-                        _add_hierarchical_metadata(doc, file_path, current_files_on_disk[file_path]['type'])
-                        chunks_to_process.append(doc)
-                else: # Pour les documents plus grands (> environ 5KB)
-                    current_app.logger.info(f"Fichier grand (>=5KB): {file_path}. Chunking par 1000 caractères.")
-                    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200) # chunk_size 1000, overlap 200
-                    temp_chunks = text_splitter.split_documents(loaded_docs)
+                
+                # Itérer sur chaque élément du document chargé (par ex., sections, tables)
+                for doc_element in loaded_docs:
+                    # Vérifier si l'élément est un tableau (selon les métadonnées fournies par Unstructured)
+                    is_table = doc_element.metadata.get('category') == 'Table'
                     
-                    for chunk in temp_chunks:
-                        chunk.metadata = chunk.metadata or {} # S'assurer que metadata est un dict
-                        _add_hierarchical_metadata(chunk, file_path, current_files_on_disk[file_path]['type'])
-                        chunks_to_process.append(chunk)
+                    if is_table:
+                        current_app.logger.info(f"Détection de tableau dans : {file_path}. Traitement spécifique.")
+                        table_text = doc_element.page_content
+                        # Utiliser la représentation Markdown si disponible, car elle est plus structurée pour les LLMs
+                        if doc_element.metadata.get('text_as_markdown'):
+                            table_text = doc_element.metadata['text_as_markdown']
+
+                        table_lines = table_text.split('\n')
+                        
+                        header_content = ""
+                        body_lines = []
+
+                        # Heuristique simple pour extraire l'en-tête d'un tableau Markdown-like
+                        # Cela suppose que l'en-tête est suivi par une ligne de séparateur (|---|)
+                        header_end_idx = -1
+                        for i, line in enumerate(table_lines):
+                            if line.strip().startswith('|---'):
+                                header_end_idx = i
+                                break
+                        
+                        if header_end_idx != -1:
+                            header_lines = table_lines[:header_end_idx]
+                            body_lines = table_lines[header_end_idx + 1:]
+                            header_content = "\n".join(header_lines).strip() + "\n" # Conserver le format Markdown
+                        else:
+                            # Si pas de séparateur, considérer que l'en-tête est implicite ou que c'est une table simple
+                            # Pour cet exemple, nous allons juste prendre les premières lignes comme en-têtes potentielles
+                            # ou gérer tout le contenu comme corps si c'est très court.
+                            if len(table_lines) > 1 and '|' in table_lines[0]: # Simple heuristique pour une ligne d'entête si elle a des '|'
+                                header_content = table_lines[0].strip() + "\n" + table_lines[1].strip() + "\n" # Ligne d'entête + séparateur
+                                body_lines = table_lines[2:]
+                            else:
+                                # Fallback: considérer tout le contenu comme corps, ou si petit, un seul chunk.
+                                body_lines = table_lines
+                                header_content = "" # Pas d'en-tête claire détectée ou non applicable au découpage
+
+                        # Découper le corps du tableau et préfixer chaque chunk avec l'en-tête
+                        # Un chunk_size plus petit est utilisé pour les tables pour éviter de couper les lignes
+                        # et pour préserver le contexte des lignes
+                        if len(body_lines) > 0: # S'il y a des lignes de données dans le tableau
+                            # Utilisation d'un RecursiveCharacterTextSplitter avec des séparateurs spécifiques
+                            # pour essayer de ne pas couper les lignes de tableau.
+                            # `separators=["\n\n", "\n", " ", ""]` pour privilégier les sauts de ligne
+                            table_splitter = RecursiveCharacterTextSplitter(
+                                chunk_size=250, # Taille de chunk plus petite pour mieux gérer les lignes de tableau
+                                chunk_overlap=50, # Chevauchement pour le contexte entre les "pages" du tableau
+                                separators=["\n\n", "\n", " ", ""] # Découpage privilégiant les sauts de ligne
+                            )
+                            
+                            current_table_chunks = table_splitter.split_text("\n".join(body_lines))
+                            
+                            for chunk_text in current_table_chunks:
+                                # Préfixer chaque chunk de données de tableau avec l'en-tête
+                                new_content = header_content + chunk_text
+                                new_doc = Document(page_content=new_content, metadata=doc_element.metadata.copy())
+                                new_doc.metadata['is_table_chunk'] = True # Marqueur pour les chunks de tableau
+                                _add_hierarchical_metadata(new_doc, file_path, current_files_on_disk[file_path]['type'])
+                                chunks_to_process.append(new_doc)
+                        else: # Si le tableau est vide ou très petit et n'a pas de lignes de corps après l'en-tête
+                            # Traiter le tableau entier comme un seul chunk, même s'il n'y a que l'en-tête
+                            new_doc = Document(page_content=table_text, metadata=doc_element.metadata.copy())
+                            new_doc.metadata['is_table_chunk'] = True
+                            _add_hierarchical_metadata(new_doc, file_path, current_files_on_disk[file_path]['type'])
+                            chunks_to_process.append(new_doc)
+
+                    else: # Traiter les éléments qui ne sont pas des tableaux normalement (texte, titres, etc.)
+                        # La décision de chunking par 1000 caractères s'applique ici aux éléments non-tables
+                        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+                        # Splitter chaque élément non-table individuellement
+                        temp_chunks = text_splitter.split_documents([doc_element])
+                        for chunk in temp_chunks:
+                            _add_hierarchical_metadata(chunk, file_path, current_files_on_disk[file_path]['type'])
+                            chunks_to_process.append(chunk)
 
                 mtime = os.path.getmtime(file_path)
                 timestamp_mtime = datetime.datetime.fromtimestamp(mtime)
@@ -262,6 +359,7 @@ def _update_vectorstore_from_disk():
 
             except Exception as e:
                 current_app.logger.error(f"Erreur lors de la lecture/traitement de {file_path}: {e}. Ce document sera ignoré.")
+                current_app.logger.error(f"TRACEBACK TABLE PROCESSING ERROR: \n{traceback.format_exc()}")
                 pass 
 
         if chunks_to_process:

@@ -146,7 +146,7 @@ def chat():
             base_url=current_app.config['LMSTUDIO_UNIFIED_API_BASE'],
             api_key=current_app.config['LMSTUDIO_API_KEY'],
             model=current_app.config['LMSTUDIO_CHAT_MODEL'],
-            temperature=0.2,
+            temperature=0.2, # Modifié à 0.2
             user=session_key
         )
         _llm_instances_by_session_id[session_key] = chat_llm_instance_for_current_request
@@ -162,7 +162,7 @@ def chat():
                     base_url=current_app.config['LMSTUDIO_UNIFIED_API_BASE'],
                     api_key=current_app.config['LMSTUDIO_API_KEY'],
                     model=current_app.config['LMSTUDIO_CHAT_MODEL'],
-                    temperature=0.2,
+                    temperature=0.2, # Modifié à 0.2
                     user=session_key
                 )
                 _llm_instances_by_session_id[session_key] = chat_llm_instance_for_current_request
@@ -177,7 +177,7 @@ def chat():
                 base_url=current_app.config['LMSTUDIO_UNIFIED_API_BASE'],
                 api_key=current_app.config['LMSTUDIO_API_KEY'],
                 model=current_app.config['LMSTUDIO_CHAT_MODEL'],
-                temperature=0.2,
+                temperature=0.2, # Modifié à 0.2
                 user=session_key
             )
             _llm_instances_by_session_id[session_key] = chat_llm_instance_for_current_request
@@ -191,7 +191,7 @@ def chat():
                 base_url=current_app.config['LMSTUDIO_UNIFIED_API_BASE'],
                 api_key=current_app.config['LMSTUDIO_API_KEY'],
                 model=current_app.config['LMSTUDIO_CHAT_MODEL'],
-                temperature=0.2,
+                temperature=0.2, # Modifié à 0.2
                 user=session_key
             )
              _llm_instances_by_session_id[session_key] = chat_llm_instance_for_current_request
@@ -265,7 +265,7 @@ def chat():
             if rag_mode != 'general':
                 try:
                     if metadata_filter_dict:
-                        k_value = 10 if rag_mode == 'code_rag' else 5 # This is the line to change
+                        k_value = 10 # Modifié à 10
                         retriever_to_use = current_vectorstore.as_retriever(search_kwargs={"k": k_value, "filter": metadata_filter_dict})
                         app.logger.info(f"DEBUG RAG: Utilisation du retriever filtré avec filtre: {filter_applied_log}")
                     else: 
