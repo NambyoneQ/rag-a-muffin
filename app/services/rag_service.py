@@ -87,7 +87,7 @@ def initialize_vectorstore():
 
     if _vectorstore is not None:
         if _vectorstore._collection.count() > 0:
-            _retriever = _vectorstore.as_retriever(search_kwargs={"k": 5})
+            _retriever = _vectorstore.as_retriever(search_kwargs={"k": 10})
             current_app.logger.info("Vector Store (RAG) initialisé et Retriever prêt.")
         else:
             current_app.logger.info("Vector Store vide après ingestion. RAG sera désactivé temporairement.")
@@ -304,6 +304,11 @@ def _add_hierarchical_metadata(doc, file_path, file_type):
     doc.metadata['document_path_relative'] = relative_path # Chemin relatif complet
     doc.metadata['file_type'] = file_type # Conserve le type 'kb' ou 'code'
     
+    # NOUVEL AJOUT : Ajout du nom du projet pour les fichiers de code
+    if file_type == 'code' and len(path_components) > 0: 
+        doc.metadata['project_name'] = path_components[0]
+        current_app.logger.info(f"Ajout du metadata 'project_name': {path_components[0]} pour {file_path}")
+
     # Pour le 'document_title', si le loader Unstructured a déjà trouvé un titre, le conserver.
     # Sinon, utiliser le nom du fichier (sans extension) comme titre par défaut.
     if 'title' not in doc.metadata or not doc.metadata['title']: # 'title' est une clé standard de LangChain/Unstructured

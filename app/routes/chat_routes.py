@@ -1,12 +1,12 @@
 # app/routes/chat_routes.py
 
-import os # <--- C'EST CETTE LIGNE QUI DOIT ÊTRE PRÉSENTE
-import uuid 
-from flask import render_template, request, jsonify, Blueprint, current_app 
+import os
+import uuid
+from flask import render_template, request, jsonify, Blueprint, current_app
 
-from app import app, db 
-from app.services.conversation_service import load_conversation_history, save_message 
-from langchain_openai import ChatOpenAI 
+from app import app, db
+from app.services.conversation_service import load_conversation_history, save_message
+from langchain_openai import ChatOpenAI
 
 from langchain.memory import ConversationBufferMemory
 from langchain_core.messages import HumanMessage, AIMessage, BaseMessage
@@ -22,7 +22,7 @@ rag_strict_prompt = None
 rag_fallback_prompt = None
 code_analysis_prompt = None
 general_llm_chain = None
-general_llm_prompt_template = None 
+general_llm_prompt_template = None
 
 _llm_instances_by_session_id = {}
 
@@ -74,11 +74,11 @@ def initialize_chains_with_app(app_instance):
 # Définition des routes du Blueprint
 @chat_bp.route('/')
 def index():
-    from app.models import Conversation 
+    from app.models import Conversation
     conversations = Conversation.query.order_by(Conversation.timestamp.desc()).all()
     project_names = []
-    code_base_dir = app.config.get('CODE_BASE_DIR') 
-    if code_base_dir and os.path.exists(code_base_dir): # Ligne 71 dans l'erreur
+    code_base_dir = app.config.get('CODE_BASE_DIR')
+    if code_base_dir and os.path.exists(code_base_dir):
         project_names = [d for d in os.listdir(code_base_dir) if os.path.isdir(os.path.join(code_base_dir, d))]
     
     return render_template('index.html', conversations=conversations, project_names=project_names)
@@ -94,12 +94,12 @@ def get_all_conversations():
 @chat_bp.route('/conversations', methods=['POST'])
 def create_conversation():
     from app.models import Conversation
-    data = request.get_json(silent=True) 
+    data = request.get_json(silent=True)
     if not isinstance(data, dict):
         app.logger.error(f"Requête JSON manquante ou malformée pour créer conversation. Data reçue: {data}")
         return jsonify({'error': 'Requête invalide: JSON manquant ou malformé.'}), 400
 
-    name = data.get('name') 
+    name = data.get('name')
     if not name:
         app.logger.error("Nom de conversation manquant dans la requête JSON.")
         return jsonify({'error': 'Le nom de la conversation est requis.'}), 400
@@ -108,7 +108,7 @@ def create_conversation():
     if existing_conversations_count >= 3:
         return jsonify({'error': 'Vous ne pouvez pas créer plus de 3 conversations persistantes.'}), 400
 
-    new_conv = Conversation(name=name) 
+    new_conv = Conversation(name=name)
     try:
         db.session.add(new_conv)
         db.session.commit()
@@ -127,7 +127,7 @@ def chat():
         return jsonify({'response': "Erreur: La requête n'est pas au format JSON valide."}), 400
 
     user_message = request_data.get('message', '')
-    conv_id_from_request = request_data.get('conversation_id') 
+    conv_id_from_request = request_data.get('conversation_id')
     ephemeral_history_from_frontend = request_data.get('ephemeral_history', [])
     rag_mode = request_data.get('rag_mode', 'fallback_rag')
     selected_project = request_data.get('selected_project', None)
@@ -135,18 +135,18 @@ def chat():
 
     chat_llm_instance_for_current_request = None
     final_chat_history_for_llm = []
-    session_key = "default_ephemeral_session_key" 
+    session_key = "default_ephemeral_session_key"
 
     if conv_id_from_request == "new_ephemeral_session_request":
         session_key = str(uuid.uuid4())
         app.logger.info(f"Mode 'Nouvelle Conversation Éphémère': Nouvelle session_key générée: {session_key}")
-        final_chat_history_for_llm = [] 
+        final_chat_history_for_llm = []
         
         chat_llm_instance_for_current_request = ChatOpenAI(
-            base_url=current_app.config['LMSTUDIO_UNIFIED_API_BASE'], 
-            api_key=current_app.config['LMSTUDIO_API_KEY'], 
-            model=current_app.config['LMSTUDIO_CHAT_MODEL'], 
-            temperature=0.4,
+            base_url=current_app.config['LMSTUDIO_UNIFIED_API_BASE'],
+            api_key=current_app.config['LMSTUDIO_API_KEY'],
+            model=current_app.config['LMSTUDIO_CHAT_MODEL'],
+            temperature=0.2,
             user=session_key
         )
         _llm_instances_by_session_id[session_key] = chat_llm_instance_for_current_request
@@ -159,10 +159,10 @@ def chat():
             
             if session_key not in _llm_instances_by_session_id:
                 chat_llm_instance_for_current_request = ChatOpenAI(
-                    base_url=current_app.config['LMSTUDIO_UNIFIED_API_BASE'], 
-                    api_key=current_app.config['LMSTUDIO_API_KEY'], 
-                    model=current_app.config['LMSTUDIO_CHAT_MODEL'], 
-                    temperature=0.4,
+                    base_url=current_app.config['LMSTUDIO_UNIFIED_API_BASE'],
+                    api_key=current_app.config['LMSTUDIO_API_KEY'],
+                    model=current_app.config['LMSTUDIO_CHAT_MODEL'],
+                    temperature=0.2,
                     user=session_key
                 )
                 _llm_instances_by_session_id[session_key] = chat_llm_instance_for_current_request
@@ -174,10 +174,10 @@ def chat():
             session_key = str(uuid.uuid4())
             final_chat_history_for_llm = []
             chat_llm_instance_for_current_request = ChatOpenAI(
-                base_url=current_app.config['LMSTUDIO_UNIFIED_API_BASE'], 
-                api_key=current_app.config['LMSTUDIO_API_KEY'], 
-                model=current_app.config['LMSTUDIO_CHAT_MODEL'], 
-                temperature=0.4,
+                base_url=current_app.config['LMSTUDIO_UNIFIED_API_BASE'],
+                api_key=current_app.config['LMSTUDIO_API_KEY'],
+                model=current_app.config['LMSTUDIO_CHAT_MODEL'],
+                temperature=0.2,
                 user=session_key
             )
             _llm_instances_by_session_id[session_key] = chat_llm_instance_for_current_request
@@ -188,10 +188,10 @@ def chat():
         
         if session_key not in _llm_instances_by_session_id:
              chat_llm_instance_for_current_request = ChatOpenAI(
-                base_url=current_app.config['LMSTUDIO_UNIFIED_API_BASE'], 
-                api_key=current_app.config['LMSTUDIO_API_KEY'], 
-                model=current_app.config['LMSTUDIO_CHAT_MODEL'], 
-                temperature=0.4,
+                base_url=current_app.config['LMSTUDIO_UNIFIED_API_BASE'],
+                api_key=current_app.config['LMSTUDIO_API_KEY'],
+                model=current_app.config['LMSTUDIO_CHAT_MODEL'],
+                temperature=0.2,
                 user=session_key
             )
              _llm_instances_by_session_id[session_key] = chat_llm_instance_for_current_request
@@ -218,11 +218,11 @@ def chat():
 
     try:
         temp_memory = ConversationBufferMemory(
-            llm=chat_llm_instance_for_current_request, 
+            llm=chat_llm_instance_for_current_request,
             memory_key="chat_history",
             return_messages=True
         )
-        temp_memory.chat_memory.messages = final_chat_history_for_llm 
+        temp_memory.chat_memory.messages = final_chat_history_for_llm
 
         current_vectorstore = app.extensions["rag_service"]["vectorstore"]
         current_retriever = app.extensions["rag_service"]["retriever"]
@@ -232,14 +232,14 @@ def chat():
         selected_prompt = None
         
         # DÉBUT LOGIQUE DE DÉCISION DU RETRIEVER ET DU FILTRE
-        retriever_to_use = None 
-        filter_applied_log = "Aucun filtre de métadonnées." 
+        retriever_to_use = None
+        filter_applied_log = "Aucun filtre de métadonnées."
 
-        if current_vectorstore and current_retriever: 
+        if current_vectorstore and current_retriever:
             app.logger.info(f"DEBUG RAG: Question utilisateur: '{user_message}' (Mode: {rag_mode}, Projet: {selected_project}, Strict: {strict_mode}, Session: {session_key})")
             print(f"PRINT DEBUG RAG: Question utilisateur: '{user_message}' (Mode: {rag_mode}, Projet: {selected_project}, Strict: {strict_mode}, Session: {session_key})")
 
-            metadata_filter_dict = {} 
+            metadata_filter_dict = {}
 
             if rag_mode == 'kb_rag':
                 metadata_filter_dict = {"file_type": {"$eq": "kb"}}
@@ -262,14 +262,14 @@ def chat():
                     print("PRINT DEBUG: Mode analyse de code sélectionné sans projet.")
                     return jsonify({'response': response_content})
             
-            if rag_mode != 'general': 
+            if rag_mode != 'general':
                 try:
-                    if metadata_filter_dict: 
-                        k_value = 10 if rag_mode == 'code_rag' else 5
+                    if metadata_filter_dict:
+                        k_value = 10 if rag_mode == 'code_rag' else 5 # This is the line to change
                         retriever_to_use = current_vectorstore.as_retriever(search_kwargs={"k": k_value, "filter": metadata_filter_dict})
                         app.logger.info(f"DEBUG RAG: Utilisation du retriever filtré avec filtre: {filter_applied_log}")
                     else: 
-                        retriever_to_use = current_retriever 
+                        retriever_to_use = current_retriever
                         app.logger.warning("DEBUG RAG: Mode RAG sélectionné mais pas de filtre de métadonnées appliqué (possible erreur logique ou données). Utilisation du retriever global.")
                     
                     retrieved_docs = retriever_to_use.invoke(user_message)
@@ -296,14 +296,14 @@ def chat():
             print("PRINT DEBUG RAG: Documents pertinents trouvés. Utilisation du RAG.")
             app.logger.info("DEBUG RAG: Utilisation du RAG.")
 
-            chat_llm_instance_for_chain = chat_llm_instance_for_current_request 
+            chat_llm_instance_for_chain = chat_llm_instance_for_current_request
             
             if selected_prompt is None:
                 selected_prompt = rag_fallback_prompt
 
             dynamic_document_chain = create_stuff_documents_chain(chat_llm_instance_for_chain, selected_prompt) # type: ignore [reportCallIssue]
 
-            final_rag_chain_retriever = retriever_to_use 
+            final_rag_chain_retriever = retriever_to_use
             
             chain_inputs = {
                 "input": user_message,
@@ -374,12 +374,12 @@ def chat():
             response_content = "Désolé, une erreur interne est survenue lors de la génération de la réponse (format inattendu)."
 
         # Logique de sauvegarde des messages
-        if isinstance(conv_id_from_request, int): 
+        if isinstance(conv_id_from_request, int):
             save_message(conv_id_from_request, "user", user_message)
             save_message(conv_id_from_request, "bot", response_content)
         elif isinstance(conv_id_from_request, str) and len(conv_id_from_request) == 36 and conv_id_from_request.count('-') == 4:
             app.logger.info(f"Conversation éphémère (ID: {conv_id_from_request}), messages non sauvegardés en base de données.")
-        else: 
+        else:
             app.logger.info(f"Conversation éphémère (ID: {conv_id_from_request}), messages non sauvegardés en base de données.")
 
 
