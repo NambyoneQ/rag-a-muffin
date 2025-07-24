@@ -34,10 +34,9 @@ def initialize_services_on_startup():
     db.init_app(app) # Lie l'instance globale 'db' à l'application 'app'
     app.logger.info("Base de données SQLAlchemy liée à l'application.")
 
-    # Après db.init_app(app), l'objet 'app' a maintenant un attribut 'db' (app.db est l'instance db)
-    # Et dans un contexte de requête, current_app.db sera la même instance.
-
-    from app import models
+    # MODIFICATION CRUCIALE : Déplacer l'importation de models ici, APRÈS db.init_app(app)
+    # Ceci est LA solution pour la circularité models <-> db.
+    from app import models 
     try:
         # Utilisez app.db pour créer les tables, ou accédez à db directement qui est global
         # db.create_all() fonctionne si db est importé globalement là où cette fonction est appelée
@@ -62,7 +61,8 @@ def initialize_services_on_startup():
     from app.services import rag_service as _rag_service_module
     try:
         with app.app_context(): # S'assurer d'un contexte applicatif
-            _rag_service_module.initialize_vectorstore()
+            # MODIFICATION : Passer seulement l'instance 'app' à initialize_vectorstore()
+            _rag_service_module.initialize_vectorstore(app) 
         app.extensions["rag_service"] = {
             "vectorstore": _rag_service_module.get_vectorstore(),
             "retriever": _rag_service_module.get_retriever()
@@ -94,10 +94,12 @@ def initialize_services_on_startup():
     _chat_routes_module.initialize_chains_with_app(app) # Passe l'instance 'app'
     app.logger.info("Chaînes LangChain initialisées et attachées à l'application.")
 
+    # NOUVEL EMPLACEMENT POUR L'IMPORTATION ET L'ENREGISTREMENT DU BLUEPRINT
+    from app.routes.chat_routes import chat_bp 
+    app.register_blueprint(chat_bp) 
+    app.logger.info("Blueprint 'chat_bp' enregistré.")
+
     app.logger.info("Tous les services ont été initialisés avec succès.")
 
-# L'importation des routes DOIT se faire en fin de fichier __init__.py
-# Cela garantit que 'app' est déjà entièrement défini avant que les décorateurs @app.route ne soient traités.
-from app.routes import chat_routes # <-- CETTE LIGNE DOIT ÊTRE LA DERNIÈRE INSTRUCTION NON-COMMENTÉE
-# Enregistrement du Blueprint après l'importation
-app.register_blueprint(chat_routes.chat_bp) # <-- ENREGISTRER LE BLUEPRINT
+# Note: Aucune importation de route ou enregistrement de blueprint NE doit se trouver ici.
+# Elles ont été déplacées à l'intérieur de initialize_services_on_startup().
