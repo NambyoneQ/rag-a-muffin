@@ -72,46 +72,65 @@ def initialize_vectorstore(app_instance):
     global _vectorstore, _retriever
     from app import db # Importation locale de db
 
-    app_instance.logger.info(f"Vérification ou création du Vector Store ChromaDB dans '{app_instance.config['CHROMA_PERSIST_DIRECTORY']}'...")
+    chroma_dir = app_instance.config['CHROMA_PERSIST_DIRECTORY']
+    app_instance.logger.info(f"Vérification ou création du Vector Store ChromaDB dans '{chroma_dir}'...")
 
     embeddings_llm_instance = app_instance.extensions["llm_service"]["embeddings_llm"]
     if embeddings_llm_instance is None:
         app_instance.logger.error("Erreur: Le modèle d'embeddings n'est pas disponible via app.extensions. Impossible de créer le Vector Store.")
         raise RuntimeError("Embeddings LLM not initialized or not accessible via app.extensions.")
 
+    # Détermine si le répertoire ChromaDB existe et contient des fichiers AVANT de tenter de charger/créer
+    # Cette variable est utilisée pour savoir si nous devons effacer la table DocumentStatus plus tard
+    chroma_dir_existed_before_init_attempt = os.path.exists(chroma_dir) and os.listdir(chroma_dir)
+
     with db.session.begin(): # Cette transaction gère le commit/rollback pour tout ce qui est en dessous
         try:
-            if os.path.exists(app_instance.config['CHROMA_PERSIST_DIRECTORY']) and os.listdir(app_instance.config['CHROMA_PERSIST_DIRECTORY']):
-                _vectorstore = Chroma(persist_directory=app_instance.config['CHROMA_PERSIST_DIRECTORY'], embedding_function=embeddings_llm_instance)
-                app_instance.logger.info("Vector Store ChromaDB existant chargé.")
-            else:
-                app_instance.logger.info("Dossier ChromaDB non trouvé ou vide. Création d'un nouveau Vector Store.")
-                _vectorstore = Chroma(embedding_function=embeddings_llm_instance, persist_directory=app_instance.config['CHROMA_PERSIST_DIRECTORY'])
-                db.session.query(DocumentStatus).delete() # Utilise le 'db' importé localement
-                app_instance.logger.info("Anciens statuts de documents effacés pour un nouveau Vector Store.")
+            # CHARGEMENT/RECÉATION INCONDITIONNELLE : C'est le changement clé.
+            # Toujours essayer de charger depuis persist_directory. Si le dossier est vide/nouveau, Chroma l'initialisera.
+            _vectorstore = Chroma(
+                persist_directory=chroma_dir,
+                embedding_function=embeddings_llm_instance
+            )
+            app_instance.logger.info(f"Vector Store ChromaDB chargé/rechargé depuis '{chroma_dir}'.")
+
+            # Effacer la table DocumentStatus UNIQUEMENT si ChromaDB était complètement nouveau/vide
+            if not chroma_dir_existed_before_init_attempt:
+                db.session.query(DocumentStatus).delete()
+                app_instance.logger.info("Anciens statuts de documents effacés car nouveau Vector Store.")
+
         except Exception as e:
-            app_instance.logger.error(f"Erreur lors du chargement ou de la création du Vector Store: {e}. Tentative de ré-initialisation.")
-            if os.path.exists(app_instance.config['CHROMA_PERSIST_DIRECTORY']):
-                shutil.rmtree(app_instance.config['CHROMA_PERSIST_DIRECTORY'])
-            _vectorstore = Chroma(embedding_function=embeddings_llm_instance, persist_directory=app_instance.config['CHROMA_PERSIST_DIRECTORY'])
-            db.session.query(DocumentStatus).delete() # Utilise le 'db' importé localement
+            app_instance.logger.error(f"Erreur lors du chargement ou de la création du Vector Store: {e}. Tentative de ré-initialisation complète.")
+            # Si une erreur s'est produite, supprimer agressivement et recréer ChromaDB
+            if os.path.exists(chroma_dir):
+                shutil.rmtree(chroma_dir)
+            _vectorstore = Chroma(
+                embedding_function=embeddings_llm_instance,
+                persist_directory=chroma_dir
+            )
+            db.session.query(DocumentStatus).delete()
             app_instance.logger.info("Vector Store complètement recréé suite à une erreur.")
 
         try:
-            _update_vectorstore_from_disk(app_instance) # N'appelle plus de commit/rollback internes
+            # Appeler _update_vectorstore_from_disk pour traiter les fichiers et ajouter/supprimer des chunks
+            _update_vectorstore_from_disk(app_instance)
         except RuntimeError as e:
             app_instance.logger.error(f"Erreur critique lors de la mise à jour incrémentale du Vector Store: {e}")
             _vectorstore = None
             _retriever = None
             return
 
-
+    # VÉRIFICATION FINALE ET INITIALISATION DU RETRIEVER :
+    # Après _update_vectorstore_from_disk, l'instance _vectorstore devrait être à jour avec les nouveaux chunks.
     if _vectorstore is not None:
-        if _vectorstore._collection.count() > 0:
+        current_chunk_count = _vectorstore._collection.count() # Obtenez le nombre actuel de chunks
+        app_instance.logger.info(f"Nombre de chunks actuel dans le Vector Store après mise à jour: {current_chunk_count}")
+
+        if current_chunk_count > 0:
             _retriever = _vectorstore.as_retriever(search_kwargs={"k": 5}) 
             app_instance.logger.info("Vector Store (RAG) initialisé et Retriever prêt.")
         else:
-            app_instance.logger.info("Vector Store vide après ingestion. RAG sera désactivé temporairement.")
+            app_instance.logger.info("Vector Store vide. RAG sera désactivé temporairement.")
             _retriever = None
     else:
         app_instance.logger.error("Le Vector Store n'a pas put être initialisé. Le RAG sera désactivé.")
@@ -326,6 +345,8 @@ def _update_vectorstore_from_disk(app_instance):
 
         if chunks_to_process:
             app_instance.logger.info(f"Ajout de {len(chunks_to_process)} nouveaux chunks à ChromaDB.")
+            _vectorstore.add_documents(chunks_to_process) # Ajout explicite des documents à l'instance _vectorstore
+            _vectorstore.persist() # S'assurer que les changements sont persistés sur disque
             # db.session.commit() # RETIRÉ : Géré par la transaction parente
             app_instance.logger.info("Nouveaux chunks ajoutés et statuts de documents mis à jour.")
         # else: # Plus besoin de ce bloc car la transaction est gérée par le parent
