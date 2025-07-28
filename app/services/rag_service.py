@@ -31,7 +31,7 @@ EXCLUDED_EXTENSIONS = {
 }
 
 # FONCTION UTILITAIRE : Détermine le type de document et le charge
-def _load_document(file_path):
+def _load_document(file_path: str): # Ajout de l'annotation de type str
     current_app.logger.info(f"Tentative de chargement du fichier : {file_path}")
     
     file_extension = os.path.splitext(file_path)[1].lower() 
@@ -168,45 +168,46 @@ def _update_vectorstore_from_disk(app_instance):
         '.git'                 
     ]
     EXCLUDED_ABS_PATHS_NORMALIZED = [
-        os.path.normpath(os.path.join(current_app.root_path, str(p))) # type: ignore [call-overload] # Supprimer l'avertissement Pylance
+        os.path.normpath(os.path.join(current_app.root_path, str(p))) # Ajout de str() pour clarifier le type pour Pylance
         for p in APP_EXCLUSIONS_RELATIVE_TO_ROOT
     ]
     
     app_instance.logger.info(f"Fichiers/Dossiers de l'application à exclure de l'indexation : {EXCLUDED_ABS_PATHS_NORMALIZED}")
 
 
+    current_files_on_disk = {}
+    
+    # Gérer les répertoires de base de connaissances
     if not os.path.exists(kb_dir):
         app_instance.logger.info(f"ATTENTION: Le dossier de base de connaissances '{kb_dir}' n'existe pas. Création...")
         os.makedirs(kb_dir)
         app_instance.logger.info("Veuillez y placer des documents (fichiers .txt ou .pdf) pour que le RAG fonctionne.")
-
-    if not os.path.exists(code_dir):
-        app_instance.logger.info(f"ATTENTION: Le dossier de code '{code_dir}' n'existe pas. Création...")
-        os.makedirs(code_dir)
-        app_instance.logger.info("Veuillez y placer vos bases de code organisées par projet.")
-
-
-    current_files_on_disk = {}
-    
     for root, _, files in os.walk(kb_dir):
         for file in files:
             file_path = os.path.join(root, file)
-            normalized_file_path = os.path.normpath(file_path)
-            
-            if any(normalized_file_path.startswith(ep) for ep in EXCLUDED_ABS_PATHS_NORMALIZED):
+            normalized_file_path = os.path.normpath(file_path) # Pylance devrait être OK ici
+
+            # Utiliser str() pour s'assurer que 'indexed_path' est bien un string pour 'startswith'
+            if any(str(normalized_file_path).startswith(ep) for ep in EXCLUDED_ABS_PATHS_NORMALIZED): # Ajout de str()
                 app_instance.logger.info(f"Exclusion (KB - code application) : {file_path}")
                 continue
             
             current_files_on_disk[file_path] = {'mtime': os.path.getmtime(file_path), 'type': 'kb'}
 
+    # Gérer les répertoires de code
+    if not os.path.exists(code_dir):
+        app_instance.logger.info(f"ATTENTION: Le dossier de code '{code_dir}' n'existe pas. Création...")
+        os.makedirs(code_dir)
+        app_instance.logger.info("Veuillez y placer vos bases de code organisées par projet.")
     for root, dirs, files in os.walk(code_dir):
         dirs[:] = [d for d in dirs if d not in ['.git', 'venv', '__pycache__', 'chroma_db']] 
         
         for file in files:
             file_path = os.path.join(root, file)
-            normalized_file_path = os.path.normpath(file_path)
+            normalized_file_path = os.path.normpath(file_path) # Pylance devrait être OK ici
             
-            if any(normalized_file_path.startswith(ep) for ep in EXCLUDED_ABS_PATHS_NORMALIZED):
+            # Utiliser str() pour s'assurer que 'indexed_path' est bien un string pour 'startswith'
+            if any(str(normalized_file_path).startswith(ep) for ep in EXCLUDED_ABS_PATHS_NORMALIZED): # Ajout de str()
                 app_instance.logger.info(f"Exclusion (Codebase - code application) : {file_path}")
                 continue
 
@@ -221,7 +222,7 @@ def _update_vectorstore_from_disk(app_instance):
 
     for indexed_path, status_entry in indexed_documents_status.items():
         file_is_on_disk = indexed_path in current_files_on_disk
-        file_is_excluded_now = any(os.path.normpath(indexed_path).startswith(ep) for ep in EXCLUDED_ABS_PATHS_NORMALIZED)
+        file_is_excluded_now = any(os.path.normpath(str(indexed_path)).startswith(ep) for ep in EXCLUDED_ABS_PATHS_NORMALIZED) # Ajout de str() pour indexed_path
 
         if not file_is_on_disk or file_is_excluded_now:
             app_instance.logger.info(f"Document supprimé du disque ou maintenant exclu: {indexed_path}. Suppression de ChromaDB et BDD.")
@@ -236,10 +237,7 @@ def _update_vectorstore_from_disk(app_instance):
         for path_source in chunks_to_delete_from_chroma_sources:
             app_instance.logger.info(f"Tentative de suppression de la source: {path_source} de ChromaDB.")
             _vectorstore.delete(where={"source": path_source})
-        # db.session.commit() # RETIRÉ : Géré par la transaction parente
         app_instance.logger.info(f"Suppression de {len(chunks_to_delete_from_chroma_sources)} documents obsolètes de ChromaDB et BDD de suivi.")
-    # else: # Pas de raise RuntimeError ici, la transaction parente doit gérer
-    #     pass # Si une erreur survient, elle est attrapée par la transaction parente
 
     for disk_path, disk_info in current_files_on_disk.items():
         if disk_path not in indexed_documents_status:
@@ -257,7 +255,6 @@ def _update_vectorstore_from_disk(app_instance):
                 file_size_bytes = os.path.getsize(file_path)
                 
                 for doc_element in loaded_docs:
-                    print(f"PRINT DEBUG RAG: Processing doc_element from {file_path}. Metadata category: {doc_element.metadata.get('category')}")
                     app_instance.logger.info(f"DEBUG RAG: Processing doc_element from {file_path}. Metadata category: {doc_element.metadata.get('category')}")
                     
                     file_extension = os.path.splitext(file_path)[1].lower() 
@@ -328,14 +325,15 @@ def _update_vectorstore_from_disk(app_instance):
 
                 if file_path in indexed_documents_status:
                     status_entry = indexed_documents_status[file_path]
-                    status_entry.last_modified = timestamp_mtime # type: ignore [attr-defined] # Supprimer l'avertissement Pylance
-                    status_entry.indexed_at = datetime.datetime.now() # type: ignore [attr-defined] # Supprimer l'avertissement Pylance
+                    # Ces affectations sont correctes, Pylance devrait être silencieux avec les types Mapped
+                    status_entry.last_modified = timestamp_mtime 
+                    status_entry.indexed_at = datetime.datetime.now() 
                 else:
                     status_entry = DocumentStatus(
                         file_path=file_path, 
                         last_modified=timestamp_mtime, 
-                        indexed_at=datetime.datetime.now() # type: ignore [call-arg] # Supprimer l'avertissement Pylance
-                    ) # type: ignore [call-arg] # Supprimer l'avertissement Pylance pour l'ensemble du constructeur
+                        indexed_at=datetime.datetime.now()
+                    ) 
                     db.session.add(status_entry) 
 
             except Exception as e:
@@ -347,14 +345,11 @@ def _update_vectorstore_from_disk(app_instance):
             app_instance.logger.info(f"Ajout de {len(chunks_to_process)} nouveaux chunks à ChromaDB.")
             _vectorstore.add_documents(chunks_to_process) # Ajout explicite des documents à l'instance _vectorstore
             _vectorstore.persist() # S'assurer que les changements sont persistés sur disque
-            # db.session.commit() # RETIRÉ : Géré par la transaction parente
             app_instance.logger.info("Nouveaux chunks ajoutés et statuts de documents mis à jour.")
-        # else: # Plus besoin de ce bloc car la transaction est gérée par le parent
-        #     pass # La transaction parente gère le rollback en cas d'erreur
 
 
 # --- NOUVELLE FONCTION : AJOUTE LES MÉTA-DONNÉES HIÉRARCHIQUES ---
-def _add_hierarchical_metadata(doc, file_path, file_type):
+def _add_hierarchical_metadata(doc: Document, file_path: str, file_type: str): # Ajout des annotations de type
     """Ajoute les métadonnées de dossier et de nom de fichier/titre au chunk."""
     base_dir = current_app.config['KNOWLEDGE_BASE_DIR'] if file_type == 'kb' else current_app.config['CODE_BASE_DIR']
     
