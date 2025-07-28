@@ -11,19 +11,21 @@ from langchain_core.messages import HumanMessage, AIMessage, BaseMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain.chains.retrieval import create_retrieval_chain
 from langchain.chains.combine_documents import create_stuff_documents_chain
-from typing import List, Dict, Any 
+from typing import List, Dict, Any, Optional 
+from langchain_core.documents import Document # Correction ici : Importation de Document
 
 # Créez une instance de Blueprint
 chat_bp = Blueprint('chat_bp', __name__, template_folder='../templates', static_folder='../static')
 
 # Variables globales pour les chaînes LangChain et prompts
-rag_strict_prompt = None
-rag_fallback_prompt = None
-code_analysis_prompt = None
-general_llm_chain = None
-general_llm_prompt_template = None 
+# Initialisation avec Optional pour le type hinting
+rag_strict_prompt: Optional[ChatPromptTemplate] = None
+rag_fallback_prompt: Optional[ChatPromptTemplate] = None
+code_analysis_prompt: Optional[ChatPromptTemplate] = None
+general_llm_chain: Optional[Any] = None 
+general_llm_prompt_template: Optional[ChatPromptTemplate] = None 
 
-_llm_instances_by_session_id = {}
+_llm_instances_by_session_id: Dict[str, ChatOpenAI] = {}
 
 
 def initialize_chains_with_app(app_instance):
@@ -57,7 +59,8 @@ def initialize_chains_with_app(app_instance):
         ("user", "{input}")
     ])
 
-    document_chain = create_stuff_documents_chain(chat_llm_instance_global, rag_fallback_prompt) # type: ignore [call-arg]
+    # Le prompt rag_fallback_prompt est bien ChatPromptTemplate à ce stade
+    document_chain = create_stuff_documents_chain(chat_llm_instance_global, rag_fallback_prompt) 
     
     general_llm_prompt_template = ChatPromptTemplate.from_messages([
         ("system", "Vous êtes un assistant IA expert en développement, en codage, et en configurations Linux. Répondez aux questions de manière précise et concise, fournissez des exemples de code si nécessaire. Si vous ne trouvez pas la réponse, dites simplement que vous ne savez pas."),
@@ -106,7 +109,7 @@ def create_conversation():
     if existing_conversations_count >= 3:
         return jsonify({'error': 'Vous ne pouvez pas créer plus de 3 conversations persistantes.'}), 400
 
-    new_conv = models.Conversation(name=name) # type: ignore [call-arg] # Supprimer l'avertissement Pylance pour 'name'
+    new_conv = models.Conversation(name=name) 
     try:
         db.session.add(new_conv)
         db.session.commit()
@@ -131,8 +134,8 @@ def chat():
     selected_project = request_data.get('selected_project', None)
     strict_mode = request_data.get('strict_mode', False)
 
-    chat_llm_instance_for_current_request = None
-    final_chat_history_for_llm = []
+    chat_llm_instance_for_current_request: Optional[ChatOpenAI] = None 
+    final_chat_history_for_llm: List[BaseMessage] = []
     session_key = "default_ephemeral_session_key" 
 
     if conv_id_from_request == "new_ephemeral_session_request":
@@ -145,7 +148,7 @@ def chat():
             api_key=current_app.config['LMSTUDIO_API_KEY'], 
             model=current_app.config['LMSTUDIO_CHAT_MODEL'], 
             temperature=0.2,
-            user=session_key # type: ignore [call-arg] # Supprimer l'avertissement Pylance pour 'user'
+            model_kwargs={"user": session_key} 
         )
         _llm_instances_by_session_id[session_key] = chat_llm_instance_for_current_request
 
@@ -161,7 +164,7 @@ def chat():
                     api_key=current_app.config['LMSTUDIO_API_KEY'], 
                     model=current_app.config['LMSTUDIO_CHAT_MODEL'], 
                     temperature=0.2,
-                    user=session_key # type: ignore [call-arg] # Supprimer l'avertissement Pylance pour 'user'
+                    model_kwargs={"user": session_key}
                 )
                 _llm_instances_by_session_id[session_key] = chat_llm_instance_for_current_request
             else:
@@ -176,7 +179,7 @@ def chat():
                 api_key=current_app.config['LMSTUDIO_API_KEY'], 
                 model=current_app.config['LMSTUDIO_CHAT_MODEL'], 
                 temperature=0.2,
-                user=session_key # type: ignore [call-arg] # Supprimer l'avertissement Pylance pour 'user'
+                model_kwargs={"user": session_key} 
             )
             _llm_instances_by_session_id[session_key] = chat_llm_instance_for_current_request
 
@@ -190,15 +193,15 @@ def chat():
                 api_key=current_app.config['LMSTUDIO_API_KEY'], 
                 model=current_app.config['LMSTUDIO_CHAT_MODEL'], 
                 temperature=0.2,
-                user=session_key # type: ignore [call-arg] # Supprimer l'avertissement Pylance pour 'user'
+                model_kwargs={"user": session_key} 
             )
              _llm_instances_by_session_id[session_key] = chat_llm_instance_for_current_request
         else:
             chat_llm_instance_for_current_request = _llm_instances_by_session_id[session_key]
 
-        # CORRECTION DE L'UnboundLocalError ici
+        # Correction : Assurer que ephemeral_history_from_frontend est une liste avant d'itérer
         if isinstance(ephemeral_history_from_frontend, list): 
-            for msg_item in ephemeral_history_from_frontend: # Utilisez msg_item au lieu de msg
+            for msg_item in ephemeral_history_from_frontend: 
                 if isinstance(msg_item, dict): 
                     sender = msg_item.get('sender')
                     content = msg_item.get('content')
@@ -220,10 +223,10 @@ def chat():
     response_content = "Désolé, une erreur inattendue est survenue lors de la génération de la réponse."
 
     try:
+        # CORRECTION ICI : ConversationBufferMemory ne prend PAS de paramètre 'llm'
         temp_memory = ConversationBufferMemory(
-            llm=chat_llm_instance_for_current_request, 
             memory_key="chat_history",
-            return_messages=True # type: ignore [call-arg] # Supprimer l'avertissement Pylance pour 'llm'
+            return_messages=True 
         )
         temp_memory.chat_memory.messages = final_chat_history_for_llm 
 
@@ -231,22 +234,21 @@ def chat():
         current_retriever = current_app.extensions["rag_service"]["retriever"]
 
         use_rag_processing = False
-        retrieved_docs = []
-        selected_prompt = None
+        retrieved_docs: List[Document] = [] 
+        selected_prompt: Optional[ChatPromptTemplate] = None
         
         # DÉBUT LOGIQUE DE DÉCISION DU RETRIEVER ET DU FILTRE
-        retriever_to_use = None 
+        retriever_to_use: Optional[Any] = None 
         filter_applied_log = "Aucun filtre de métadonnées." 
 
         if current_vectorstore and current_retriever: 
             current_app.logger.info(f"DEBUG RAG: Question utilisateur: '{user_message}' (Mode: {rag_mode}, Projet: {selected_project}, Strict: {strict_mode}, Session: {session_key})")
             print(f"PRINT DEBUG RAG: Question utilisateur: '{user_message}' (Mode: {rag_mode}, Projet: {selected_project}, Strict: {strict_mode}, Session: {session_key})")
 
-            metadata_filter_dict = {} 
+            metadata_filter_dict: Dict[str, Any] = {} 
 
             # MODIFICATION : Combiner les modes 'kb_rag' et 'strict_rag'
             if rag_mode == 'kb_rag' or rag_mode == 'strict_rag':
-                # Initialisation des filtres avec file_type
                 all_filters: List[Dict[str, Any]] = [{"file_type": {"$eq": "kb"}}] 
                 selected_prompt = rag_strict_prompt if strict_mode else rag_fallback_prompt
                 filter_applied_log = "Filtre KB: file_type=kb"
@@ -259,7 +261,7 @@ def chat():
                     "qwanteos": "Qwanteos",
                 }
                 
-                matched_folder_filters = []
+                matched_folder_filters: List[Dict[str, Any]] = [] 
                 folder_matched_in_query = False 
                 for keyword_in_query, actual_folder_name in detected_folder_entity_map.items():
                     if keyword_in_query in user_message_lower:
@@ -323,15 +325,19 @@ def chat():
                         retriever_to_use = current_retriever
                         current_app.logger.warning("DEBUG RAG: Mode RAG sélectionné mais pas de filtre de métadonnées appliqué (possible erreur logique ou données). Utilisation du retriever global.")
                     
-                    retrieved_docs = retriever_to_use.invoke(user_message)
-                    if len(retrieved_docs) > 0:
-                        use_rag_processing = True
-                    current_app.logger.info(f"DEBUG RAG: Documents récupérés via retriever: {len(retrieved_docs)}")
-                    print(f"PRINT DEBUG RAG: Documents récupérés via retriever: {len(retrieved_docs)}")
-                    for i, doc in enumerate(retrieved_docs):
-                        source_info = doc.metadata.get('source', 'N/A') if isinstance(doc.metadata, dict) else 'N/A'
-                        current_app.logger.info(f"  Doc {i+1} (Source: {source_info}): '{doc.page_content[:100]}...'")
-                        print(f"PRINT DEBUG RAG:   Doc {i+1} (Source: {source_info}): '{doc.page_content[:100]}...'")
+                    if retriever_to_use is not None:
+                        retrieved_docs = retriever_to_use.invoke(user_message)
+                        if len(retrieved_docs) > 0:
+                            use_rag_processing = True
+                        current_app.logger.info(f"DEBUG RAG: Documents récupérés via retriever: {len(retrieved_docs)}")
+                        print(f"PRINT DEBUG RAG: Documents récupérés via retriever: {len(retrieved_docs)}")
+                        for i, doc in enumerate(retrieved_docs):
+                            source_info = doc.metadata.get('source', 'N/A') if isinstance(doc.metadata, dict) else 'N/A'
+                            current_app.logger.info(f"  Doc {i+1} (Source: {source_info}): '{doc.page_content[:100]}...'")
+                            print(f"PRINT DEBUG RAG:   Doc {i+1} (Source: {source_info}): '{doc.page_content[:100]}...'")
+                    else:
+                        current_app.logger.error("Retriever_to_use est None après la logique de sélection. Impossible d'invoquer.")
+                        response_content = "Désolé, le retriever n'a pas pu être préparé."
 
                 except Exception as invoke_e:
                     current_app.logger.error(f"Erreur lors de l'invocation du retriever: {invoke_e}")
@@ -342,31 +348,27 @@ def chat():
             else: 
                 current_app.logger.info("DEBUG RAG: Mode Général ou RAG non initialisé. Pas de recherche de documents via retriever.")
                 print("PRINT DEBUG RAG: Mode Général ou RAG non initialisé. Pas de recherche de documents via retriever.")
+        else: # Si current_vectorstore ou current_retriever est None
+            current_app.logger.warning("DEBUG RAG: Vector Store ou Retriever non initialisé. Impossible d'utiliser le RAG.")
+            print("PRINT DEBUG RAG: Vector Store ou Retriever non initialisé. Impossible d'utiliser le RAG.")
 
-        if use_rag_processing and response_content == "Désolé, une erreur inattendue est survenue lors de la génération de la réponse.":
+
+        # Déterminer la chaîne à utiliser pour la réponse
+        # Assurez-vous que selected_prompt est défini avant d'être utilisé
+        if rag_mode != 'general' and use_rag_processing and selected_prompt is not None and retriever_to_use is not None:
             print("PRINT DEBUG RAG: Documents pertinents trouvés. Utilisation du RAG.")
             current_app.logger.info("DEBUG RAG: Utilisation du RAG.")
 
             chat_llm_instance_for_chain = chat_llm_instance_for_current_request
             
-            if selected_prompt is None:
-                selected_prompt = rag_fallback_prompt
+            dynamic_document_chain = create_stuff_documents_chain(chat_llm_instance_for_chain, selected_prompt) 
 
-            dynamic_document_chain = create_stuff_documents_chain(chat_llm_instance_for_chain, selected_prompt) # type: ignore [call-arg]
-
-            final_rag_chain_retriever = retriever_to_use
-            
-            chain_inputs = {
-                "input": user_message,
-                "chat_history": temp_memory.load_memory_variables({})["chat_history"]
-            }
-            if selected_prompt == code_analysis_prompt and selected_project:
-                chain_inputs["project_name"] = selected_project
-
-            rag_chain = create_retrieval_chain(final_rag_chain_retriever, dynamic_document_chain) # type: ignore [arg-type]
+            rag_chain = create_retrieval_chain(retriever_to_use, dynamic_document_chain) 
             
             try:
-                response_langchain = rag_chain.invoke(chain_inputs)
+                response_langchain = rag_chain.invoke(
+                    {"input": user_message, "chat_history": temp_memory.load_memory_variables({})["chat_history"]}
+                )
                 response_content = response_langchain["answer"]
                 current_app.logger.info(f"DEBUG LLM Response (RAG): {response_content[:200]}...")
             except Exception as llm_e:
@@ -375,49 +377,28 @@ def chat():
                 current_app.logger.error(f"TRACEBACK LLM CHAIN ERROR (RAG): \n{traceback.format_exc()}")
                 response_content = "Désolé, le modèle de langage a rencontré une erreur lors de la génération de la réponse RAG."
                 
-        elif rag_mode == 'general' and response_content == "Désolé, une erreur inattendue est survenue lors de la génération de la réponse.":
-            print("PRINT DEBUG: Mode Général sélectionné. Utilisation du LLM général.")
-            current_app.logger.info("DEBUG: Mode Général sélectionné. Utilisation du LLM général.")
+        else: # Basculer sur le mode général si RAG n'est pas applicable ou échoué
+            print("PRINT DEBUG: Basculement sur le LLM général.")
+            current_app.logger.info("DEBUG: Basculement sur le LLM général.")
             
-            try:
-                response_langchain = general_llm_chain.invoke({ # type: ignore [call-arg]
-                    "input": user_message,
-                    "chat_history": temp_memory.load_memory_variables({})["chat_history"]
-                })
-                response_content = response_langchain.content # type: ignore [attr-defined]
-                current_app.logger.info(f"DEBUG LLM Response (General): {response_content[:200]}...")
-            except Exception as llm_e:
-                current_app.logger.error(f"Erreur lors de l'invocation de la chaîne LLM générale: {llm_e}")
-                import traceback
-                current_app.logger.error(f"TRACEBACK GENERAL LLM CHAIN ERROR: \n{traceback.format_exc()}")
-                response_content = "Désolé, le modèle de langage général a rencontré une erreur."
-
-
-        elif response_content == "Désolé, une erreur inattendue est survenue lors de la génération de la réponse.":
-            if rag_mode == 'kb_rag' and strict_mode:
-                response_content = "Je ne trouve pas cette information dans les documents fournis."
-                current_app.logger.info("DEBUG RAG: Mode RAG strict sur KB activé. Aucun document récupéré, réponse générique fournie.")
-                print("PRINT DEBUG RAG: Mode RAG strict sur KB activé. Aucun document récupéré, réponse générique fournie.")
-            elif rag_mode == 'code_rag' and selected_project:
-                 response_content = f"Je ne trouve pas cette information dans le code source du projet '{selected_project}'."
-                 current_app.logger.info(f"DEBUG RAG: Mode analyse de code activé. Aucun document récupéré pour le projet '{selected_project}', réponse générique fournie.")
-                 print(f"PRINT DEBUG RAG: Mode analyse de code activé. Aucun document récupéré pour le projet '{selected_project}', réponse générique fournie.")
-            else:
-                print("PRINT DEBUG RAG: RAG inactif ou aucun document pertinent trouvé. Basculement sur les connaissances générales du LLM.")
-                current_app.logger.info("DEBUG RAG: RAG inactif ou aucun document pertinent trouvé. Utilisation du LLM général par default.")
-
+            # Utilisation d'une variable locale pour aider Pylance
+            _general_llm_chain = general_llm_chain 
+            if _general_llm_chain is not None: 
                 try:
-                    response_langchain = general_llm_chain.invoke({ # type: ignore [call-arg]
+                    response_langchain = _general_llm_chain.invoke({ 
                         "input": user_message,
                         "chat_history": temp_memory.load_memory_variables({})["chat_history"]
                     })
-                    response_content = response_langchain.content # type: ignore [attr-defined]
-                    current_app.logger.info(f"DEBUG LLM Response (Fallback): {response_content[:200]}...")
+                    response_content = response_langchain.content 
+                    current_app.logger.info(f"DEBUG LLM Response (General/Fallback): {response_content[:200]}...")
                 except Exception as llm_e:
-                    current_app.logger.error(f"Erreur lors de l'invocation de la chaîne LLM (Fallback): {llm_e}")
+                    current_app.logger.error(f"Erreur lors de l'invocation de la chaîne LLM générale (Fallback): {llm_e}")
                     import traceback
-                    current_app.logger.error(f"TRACEBACK FALLBACK LLM CHAIN ERROR: \n{traceback.format_exc()}")
-                    response_content = "Désolé, le modèle de langage a rencontré une erreur lors du basculement."
+                    current_app.logger.error(f"TRACEBACK GENERAL LLM CHAIN ERROR (Fallback): \n{traceback.format_exc()}")
+                    response_content = "Désolé, le modèle de langage général a rencontré une erreur."
+            else:
+                response_content = "Désolé, le service LLM général n'est pas initialisé."
+                current_app.logger.error("LLM général non initialisé, impossible de répondre.")
 
 
         if not isinstance(response_content, str):
@@ -428,10 +409,11 @@ def chat():
         if isinstance(conv_id_from_request, int):
             save_message(conv_id_from_request, "user", user_message)
             save_message(conv_id_from_request, "bot", response_content)
+        # Assurez-vous que conv_id_from_request est un string avant de vérifier la longueur
         elif isinstance(conv_id_from_request, str) and len(conv_id_from_request) == 36 and conv_id_from_request.count('-') == 4:
             current_app.logger.info(f"Conversation éphémère (ID: {conv_id_from_request}), messages non sauvegardés en base de données.")
         else:
-            current_app.logger.info(f"Conversation éphémère (ID: {conv_id_from_request}), messages non sauvegardés en base de données.")
+            current_app.logger.info(f"Conversation éphémère (ID: {conv_id_from_request}), messages non sauvegardées en base de données.")
 
 
         return jsonify({'response': response_content})

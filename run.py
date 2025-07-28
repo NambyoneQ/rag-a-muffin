@@ -1,16 +1,19 @@
-from dotenv import load_dotenv # Importe la fonction pour charger les variables d'environnement
-load_dotenv() # Charge les variables du fichier .env au tout début de l'exécution
+print("DEBUG: Lancement de run.py - Point 1")
+from dotenv import load_dotenv
+print("DEBUG: Lancement de run.py - Point 2: dotenv importé")
+load_dotenv()
+print("DEBUG: Lancement de run.py - Point 3: .env chargé")
 
-from app import app, initialize_services_on_startup # Importe l'instance de l'application Flask et la fonction d'initialisation
+from app import app, initialize_services_on_startup
+print("DEBUG: Lancement de run.py - Point 4: app importé")
 
 if __name__ == '__main__':
-    # Initialise les services de l'application (base de données, LLMs, RAG)
-    # Ceci doit se faire dans un contexte d'application Flask
+    print("DEBUG: Lancement de run.py - Point 5: Dans __main__")
     with app.app_context():
+        print("DEBUG: Lancement de run.py - Point 6: Dans app_context")
         initialize_services_on_startup()
-    
-    # Lance l'application Flask
-    # debug=True active le mode débogage (rechargement automatique si code modifié, messages d'erreur détaillés)
-    # use_reloader=False désactive le reloader automatique pour éviter les problèmes de contexte avec les variables globales
-    # port=5000 définit le port sur lequel Flask écoutera
+        print("DEBUG: Lancement de run.py - Point 7: initialize_services_on_startup terminé")
+
+    print("DEBUG: Lancement de run.py - Point 8: Avant app.run()")
     app.run(debug=True, use_reloader=False, port=5000)
+    print("DEBUG: Lancement de run.py - Point 9: app.run() terminé (ne devrait pas être atteint)")

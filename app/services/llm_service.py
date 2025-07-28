@@ -70,8 +70,10 @@ def initialize_llms():
     _chat_llm_instance = ChatOpenAI(
         base_url=current_app.config['LMSTUDIO_UNIFIED_API_BASE'],
         api_key=current_app.config['LMSTUDIO_API_KEY'],
-        model="llama-3.1-8b-ultralong-4m-instruct",
+        model=current_app.config['LMSTUDIO_CHAT_MODEL'],
         temperature=0.4,
+        # Correction ici: passer le paramètre 'user' via model_kwargs
+        model_kwargs={"user": "global_llm_session"} # Un ID utilisateur générique pour le LLM global
     )
 
     _embeddings_llm_instance = LMStudioCustomEmbeddings(

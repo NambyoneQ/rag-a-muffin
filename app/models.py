@@ -1,8 +1,8 @@
 # app/models.py
 from app import db # Importe l'instance db depuis app/__init__.py
 from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey
-from sqlalchemy.orm import relationship, Mapped, mapped_column # Importation ajoutée pour Mapped et mapped_column
-import datetime # Importation nécessaire pour les types d'horodatage
+from sqlalchemy.orm import relationship, Mapped, mapped_column 
+import datetime 
 
 # Modèle pour représenter une conversation persistante dans la base de données
 class Conversation(db.Model):
@@ -11,6 +11,10 @@ class Conversation(db.Model):
     # Relation : une conversation peut avoir plusieurs messages associés
     messages: Mapped[list["Message"]] = relationship('Message', backref='conversation', lazy=True, cascade="all, delete-orphan")
     timestamp: Mapped[datetime.datetime] = mapped_column(DateTime, default=db.func.now())
+
+    # Ajout d'un __init__ explicite pour satisfaire Pylance
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
 
     def __repr__(self):
         return f'<Conversation {self.id}: {self.name}>'
@@ -24,6 +28,10 @@ class Message(db.Model):
     content: Mapped[str] = mapped_column(Text, nullable=False) # Contenu textuel du message
     timestamp: Mapped[datetime.datetime] = mapped_column(DateTime, default=db.func.now())
 
+    # Ajout d'un __init__ explicite pour satisfaire Pylance
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
     def __repr__(self):
         return f'<Message {self.id} (Conv:{self.conversation_id}): {self.content}>'
 
@@ -34,7 +42,7 @@ class DocumentStatus(db.Model):
     last_modified: Mapped[datetime.datetime] = mapped_column(DateTime, nullable=False) 
     indexed_at: Mapped[datetime.datetime] = mapped_column(DateTime, default=db.func.now()) # Date d'indexation dans ChromaDB
 
-    # Ajout d'un __init__ explicite pour satisfaire Pylance, sans affecter le comportement de SQLAlchemy
+    # Ajout d'un __init__ explicite pour satisfaire Pylance
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
