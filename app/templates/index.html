@@ -23,6 +23,13 @@
             </div>
         <div id="loading-indicator">Chargement...</div>
         <div id="input-area">
+            <div id="llm-model-selection" style="width: 100%; margin-bottom: 15px; background-color: #e0e0e0; padding: 10px; border-radius: 5px; display: flex; align-items: center; justify-content: flex-start; gap: 15px;">
+                <label for="llm-model-input" style="font-weight: bold;">Modèle LLM (LM Studio):</label>
+                <span id="current-llm-model-display" style="font-style: italic;">Modèle actuel: {{ current_chat_model }}</span>
+                <input type="text" id="llm-model-input" placeholder="Entrez le nom du modèle (ex: Llama-3.1-8B-UltraLong-4M-Instruct)" style="flex-grow: 1; padding: 5px; border: 1px solid #ccc; border-radius: 3px;">
+                <button id="set-llm-model-btn" class="btn btn-sm btn-primary">Appliquer Modèle</button>
+            </div>
+
             <div id="search-mode-selection">
                 <label>Mode de recherche:</label>
                 <input type="radio" id="mode-general" name="search_mode" value="general" checked>
@@ -45,7 +52,7 @@
                 </select>
             </div>
 
-            <div id="rag-strictness-selection" style="width: 100%; margin-bottom: 15px;">
+            <div id="strictness-container" style="width: 100%; margin-bottom: 15px;">
                 <input type="checkbox" id="strict-mode-checkbox" name="strict_mode">
                 <label for="strict-mode-checkbox">Mode Strict (Répond uniquement si l'info est dans les docs/code)</label>
             </div>
