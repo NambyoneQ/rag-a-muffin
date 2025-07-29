@@ -12,7 +12,8 @@ from langchain_community.document_loaders import TextLoader, PyPDFLoader, Unstru
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document 
 
-import openpyxl # NOUVEAU : Importation de openpyxl
+import openpyxl # NOUVEAU : Importation de openpyxl pour .xlsx
+import pyexcel_ods # NOUVEAU : Importation de pyexcel_ods pour .ods
 
 from app.models import DocumentStatus 
 
@@ -77,15 +78,41 @@ def _load_document(file_path: str) -> List[Document]:
                     
                     # Créer un Document LangChain pour chaque feuille
                     doc_metadata = {'sheet_name': sheet_name_in_wb, 'source': file_path, 'file_type': 'kb'}
-                    # Assurez-vous que les métadonnées spécifiques à la feuille sont passées
-                    if hasattr(sheet, 'title'): # openpyxl sheet has a title attribute
+                    if hasattr(sheet, 'title'): 
                         doc_metadata['sheet_title'] = sheet.title
 
                     loaded_excel_docs.append(Document(page_content=sheet_text_content, metadata=doc_metadata))
                 else:
-                    current_app.logger.info(f"  Feuille '{sheet_name_in_wb}' est vide. Ignorée.")
+                    current_app.logger.info(f"  Feuille '{sheet_name_in_wb}' de {file_path} est vide. Ignorée.")
             
             return loaded_excel_docs
+
+        elif file_extension == '.ods': # NOUVEAU : Logique pour les fichiers ODS
+            current_app.logger.info(f"Chargement ODS avec pyexcel-ods : {file_path}")
+            # get_data retourne un OrderedDict où les clés sont les noms de feuilles et les valeurs sont des listes de listes
+            ods_data = pyexcel_ods.get_data(file_path)
+
+            loaded_ods_docs: List[Document] = []
+            for sheet_name_in_wb, sheet_rows_data_raw in ods_data.items():
+                
+                sheet_rows_data: List[List[str]] = []
+                for row_raw in sheet_rows_data_raw:
+                    row_values = [str(cell_val if cell_val is not None else '').strip() for cell_val in row_raw]
+                    if any(val for val in row_values): 
+                        sheet_rows_data.append(row_values)
+                
+                if sheet_rows_data:
+                    # Concaténer les lignes de la feuille en un seul texte pour le Document
+                    sheet_text_content = "\n".join(["\t".join(row_vals) for row_vals in sheet_rows_data])
+                    
+                    doc_metadata = {'sheet_name': sheet_name_in_wb, 'source': file_path, 'file_type': 'kb'}
+                    # pyexcel_ods ne fournit pas d'attribut 'title' comme openpyxl, pas de doc_metadata['sheet_title'] ici
+                    
+                    loaded_ods_docs.append(Document(page_content=sheet_text_content, metadata=doc_metadata))
+                else:
+                    current_app.logger.info(f"  Feuille '{sheet_name_in_wb}' de {file_path} est vide. Ignorée.")
+            
+            return loaded_ods_docs
 
         else: 
             loader = TextLoader(file_path, encoding='utf-8', autodetect_encoding=True)
@@ -268,7 +295,6 @@ def _update_vectorstore_from_disk(app_instance):
 
         for file_path in documents_to_add:
             try:
-                # _load_document retourne maintenant des Documents LangChain (un par feuille Excel)
                 loaded_docs = _load_document(file_path)
                 if not loaded_docs:
                     current_app.logger.warning(f"Aucun document chargé pour {file_path}. Skipping.")
@@ -277,21 +303,19 @@ def _update_vectorstore_from_disk(app_instance):
                 file_size_bytes = os.path.getsize(file_path)
                 file_extension = os.path.splitext(file_path)[1].lower()
 
-                # --- TRAITEMENT DES DOCUMENTS PAR TYPE DE FICHIER ---
-                # Si c'est un fichier Excel, loaded_docs contient un Document par feuille
-                if file_extension == '.xlsx':
-                    app_instance.logger.info(f"Traitement des feuilles XLSX individuelles pour {file_path}")
+                # --- TRAITEMENT DES DOCUMENTS PAR TYPE DE FICHIER (y compris XLSX et ODS) ---
+                if file_extension in ['.xlsx', '.ods']: # Maintenant aussi pour les fichiers ODS
+                    app_instance.logger.info(f"Traitement des feuilles de calcul individuelles pour {file_path} (extension: {file_extension})")
                     
-                    for doc_element in loaded_docs: # Chaque doc_element est maintenant une feuille Excel
+                    for doc_element in loaded_docs: # Chaque doc_element est un Document LangChain d'une feuille
                         sheet_name = doc_element.metadata.get('sheet_name')
-                        # Fallback pour le nom de la feuille si non détecté (utilise le nom de fichier si une seule feuille)
                         if sheet_name is None: 
                             sheet_name = os.path.splitext(os.path.basename(file_path))[0]
-                        doc_element.metadata['tab'] = sheet_name # Ajout de la métadonnée 'tab'
+                        doc_element.metadata['tab'] = sheet_name 
 
                         app_instance.logger.info(f"DEBUG RAG: Traitement de la feuille '{sheet_name}' de {file_path}")
 
-                        consolidated_content_from_sheet = doc_element.page_content # Le contenu de la feuille est déjà consolidé
+                        consolidated_content_from_sheet = doc_element.page_content 
                         lines = [line.strip() for line in consolidated_content_from_sheet.split('\n') if line.strip()]
                         
                         infos_index = -1
@@ -337,7 +361,6 @@ def _update_vectorstore_from_disk(app_instance):
                             table_data_lines = [line for line in table_data_lines if "infos" not in line.lower()]
 
                         else: # Pas de "Infos" trouvé dans cette feuille
-                            # Traiter toute la feuille comme un chunk de contexte si pas de "Infos"
                             full_sheet_text_without_infos = "\n".join(lines).strip()
                             if full_sheet_text_without_infos:
                                 doc = Document(page_content=full_sheet_text_without_infos, metadata=doc_element.metadata.copy())
@@ -349,7 +372,7 @@ def _update_vectorstore_from_disk(app_instance):
                                 app_instance.logger.info(f"Créé chunk 'full_sheet_context' pour '{sheet_name}' de {file_path} (pas d'Infos)")
                             else:
                                 app_instance.logger.info(f"Feuille '{sheet_name}' est vide après nettoyage. Ignorée.")
-                            table_data_lines = [] # S'assurer qu'il n'y a pas de données de tableau à traiter
+                            table_data_lines = [] 
                             table_headers = []
 
                         # Formater les données de tableau structurées en chunks Markdown
@@ -369,8 +392,7 @@ def _update_vectorstore_from_disk(app_instance):
                                 row_line_stripped = row_line.strip()
                                 if not row_line_stripped: continue 
 
-                                # Les lignes de données sont déjà des chaînes textuelles dans table_data_lines
-                                formatted_row_for_markdown = "| " + " | ".join(row_line_stripped.split('\t')) + " |" # Split par tab car on a joint par tab
+                                formatted_row_for_markdown = "| " + " | ".join(row_line_stripped.split('\t')) + " |" 
 
                                 if current_chunk_chars + len(formatted_row_for_markdown) + 1 > MAX_CHUNK_CHARS and current_markdown_rows:
                                     structured_content = initial_chunk_content_header + "\n".join(current_markdown_rows)
