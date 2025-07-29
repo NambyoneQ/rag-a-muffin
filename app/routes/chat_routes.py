@@ -2,11 +2,12 @@
 
 import os
 import uuid
+import re 
 from flask import render_template, request, jsonify, Blueprint, current_app 
-from app.services.conversation_service import load_conversation_history, save_message
-from langchain_openai import ChatOpenAI
+from app.services.conversation_service import load_conversation_history, save_message 
+from langchain_openai import ChatOpenAI 
 
-from langchain.memory import ConversationBufferMemory
+from langchain.memory import ConversationSummaryBufferMemory 
 from langchain_core.messages import HumanMessage, AIMessage, BaseMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain.chains.retrieval import create_retrieval_chain
@@ -78,7 +79,6 @@ def index():
         project_names = [d for d in os.listdir(code_base_dir) if os.path.isdir(os.path.join(code_base_dir, d))]
     
     conversations = models.Conversation.query.order_by(models.Conversation.timestamp.desc()).all()
-    # Passer le nom du modèle actuel au template
     current_chat_model = current_app.config.get('LMSTUDIO_CHAT_MODEL', 'Modèle non défini')
     return render_template('index.html', conversations=conversations, project_names=project_names, current_chat_model=current_chat_model)
 
@@ -135,55 +135,33 @@ def chat():
 
     chat_llm_instance_for_current_request: Optional[ChatOpenAI] = None 
     final_chat_history_for_llm: List[BaseMessage] = []
-    session_key = "default_ephemeral_session_key" 
+    
+    session_key: Optional[str] = None # Initialisation explicite de session_key
+
+    # Correction ici: Initialisation des variables pour éviter les avertissements "possibly unbound"
+    detected_tab_names: List[str] = [] 
+    matched_folder_filters: List[Dict[str, Any]] = [] # Initialisation
+    folder_matched_in_query: bool = False # Initialisation
 
     actual_llm_model_to_use = selected_llm_model_name if selected_llm_model_name else current_app.config['LMSTUDIO_CHAT_MODEL']
 
-    if conv_id_from_request == "new_ephemeral_session_request":
-        session_key = str(uuid.uuid4())
-        current_app.logger.info(f"Mode 'Nouvelle Conversation Éphémère': Nouvelle session_key générée: {session_key}")
+    # Logique pour déterminer session_key
+    if conv_id_from_request == "new_ephemeral_session_request" or conv_id_from_request is None:
+        session_key = str(uuid.uuid4()) # Générer un nouvel UUID pour la session éphémère
+        current_app.logger.info(f"Mode 'Nouvelle Conversation Éphémère' ou Première requête: Nouvelle session_key générée: {session_key}")
         final_chat_history_for_llm = [] 
-        
-        chat_llm_instance_for_current_request = ChatOpenAI(
-            base_url=current_app.config['LMSTUDIO_UNIFIED_API_BASE'], 
-            api_key=current_app.config['LMSTUDIO_API_KEY'], 
-            model=actual_llm_model_to_use, 
-            temperature=0.2,
-            model_kwargs={"user": session_key} 
-        )
-        _llm_instances_by_session_id[session_key] = chat_llm_instance_for_current_request
-
     elif isinstance(conv_id_from_request, int):
-        try:
-            session_key = str(conv_id_from_request)
-            current_app.logger.info(f"Conversation persistante ID: {session_key}. Chargement de l'historique.")
-            final_chat_history_for_llm = load_conversation_history(conv_id_from_request)
-            
-            if session_key not in _llm_instances_by_session_id:
-                chat_llm_instance_for_current_request = ChatOpenAI(
-                    base_url=current_app.config['LMSTUDIO_UNIFIED_API_BASE'], 
-                    api_key=current_app.config['LMSTUDIO_API_KEY'], 
-                    model=actual_llm_model_to_use, 
-                    temperature=0.2,
-                    model_kwargs={"user": session_key}
-                )
-                _llm_instances_by_session_id[session_key] = chat_llm_instance_for_current_request
-            else:
-                chat_llm_instance_for_current_request = _llm_instances_by_session_id[session_key]
-                if chat_llm_instance_for_current_request.model_name != actual_llm_model_to_use:
-                    chat_llm_instance_for_current_request = ChatOpenAI(
-                        base_url=current_app.config['LMSTUDIO_UNIFIED_API_BASE'], 
-                        api_key=current_app.config['LMSTUDIO_API_KEY'], 
-                        model=actual_llm_model_to_use, 
-                        temperature=0.2,
-                        model_kwargs={"user": session_key}
-                    )
-                    _llm_instances_by_session_id[session_key] = chat_llm_instance_for_current_request
-                
-        except ValueError:
-            current_app.logger.error(f"ID de conversation invalide reçu: {conv_id_from_request}. Traitement comme éphémère vide.")
-            session_key = str(uuid.uuid4())
-            final_chat_history_for_llm = []
+        session_key = str(conv_id_from_request)
+        current_app.logger.info(f"Conversation persistante ID: {session_key}. Chargement de l'historique.")
+        final_chat_history_for_llm = load_conversation_history(conv_id_from_request) 
+    else:
+        session_key = str(uuid.uuid4()) # Fallback: créer un nouvel UUID
+        current_app.logger.warning(f"ID de conversation inattendu reçu: {conv_id_from_request}. Création d'une nouvelle session éphémère avec ID: {session_key}")
+        final_chat_history_for_llm = []
+
+    # Gestion de l'instance LLM par session_key
+    if session_key is not None: 
+        if session_key not in _llm_instances_by_session_id:
             chat_llm_instance_for_current_request = ChatOpenAI(
                 base_url=current_app.config['LMSTUDIO_UNIFIED_API_BASE'], 
                 api_key=current_app.config['LMSTUDIO_API_KEY'], 
@@ -192,20 +170,6 @@ def chat():
                 model_kwargs={"user": session_key} 
             )
             _llm_instances_by_session_id[session_key] = chat_llm_instance_for_current_request
-
-    else: 
-        session_key = 'initial_default_ephemeral_session'
-        current_app.logger.info("Conv_ID manquant ou non-UUID/int. Traitement comme session éphémère par défaut.")
-        
-        if session_key not in _llm_instances_by_session_id:
-             chat_llm_instance_for_current_request = ChatOpenAI(
-                base_url=current_app.config['LMSTUDIO_UNIFIED_API_BASE'], 
-                api_key=current_app.config['LMSTUDIO_API_KEY'], 
-                model=actual_llm_model_to_use, 
-                temperature=0.2,
-                model_kwargs={"user": session_key} 
-            )
-             _llm_instances_by_session_id[session_key] = chat_llm_instance_for_current_request
         else:
             chat_llm_instance_for_current_request = _llm_instances_by_session_id[session_key]
             if chat_llm_instance_for_current_request.model_name != actual_llm_model_to_use:
@@ -217,36 +181,21 @@ def chat():
                     model_kwargs={"user": session_key}
                 )
                 _llm_instances_by_session_id[session_key] = chat_llm_instance_for_current_request
-
-
-        if isinstance(ephemeral_history_from_frontend, list): 
-            for msg_item in ephemeral_history_from_frontend: 
-                if isinstance(msg_item, dict): 
-                    sender = msg_item.get('sender')
-                    content = msg_item.get('content')
-                    if sender == 'user' and content is not None:
-                        final_chat_history_for_llm.append(HumanMessage(content=content))
-                    elif sender == 'bot' and content is not None:
-                        final_chat_history_for_llm.append(AIMessage(content=content))
-                else:
-                    current_app.logger.warning(f"Élément inattendu dans ephemeral_history_from_frontend: {msg_item}. Ignoré.")
-        else: 
-            current_app.logger.warning(f"ephemeral_history_from_frontend n'est pas une liste ou est de format inattendu: {ephemeral_history_from_frontend}. Ignoré.")
-            final_chat_history_for_llm = [] 
-
-
-    if chat_llm_instance_for_current_request is None:
-        current_app.logger.error("Chat LLM non disponible après initialisation conditionnelle.")
-        return jsonify({'response': "Erreur interne: Chat LLM non disponible."}), 500
+                
+    else: 
+        current_app.logger.error("Session key non définie après la logique d'identification de session. Impossible de créer l'instance LLM.")
+        return jsonify({'response': "Erreur interne: Clé de session LLM non définie."}), 500
 
     response_content = "Désolé, une erreur inattendue est survenue lors de la génération de la réponse."
 
     try:
-        temp_memory = ConversationBufferMemory(
+        temp_memory = ConversationSummaryBufferMemory(
+            llm=chat_llm_instance_for_current_request, 
+            max_token_limit=2000, 
             memory_key="chat_history",
             return_messages=True 
         )
-        temp_memory.chat_memory.messages = final_chat_history_for_llm 
+        temp_memory.chat_memory.add_messages(final_chat_history_for_llm)
 
         current_vectorstore = current_app.extensions["rag_service"]["vectorstore"]
         current_retriever = current_app.extensions["rag_service"]["retriever"]
@@ -271,29 +220,47 @@ def chat():
 
                 user_message_lower = user_message.lower()
 
-                detected_folder_entity_map = {
-                    "sporebio": "Sporebio", 
-                    "qwanteos": "Qwanteos",
-                }
+                available_folder_names = current_app.extensions.get('available_folder_names', []) 
                 
-                matched_folder_filters: List[Dict[str, Any]] = [] 
-                folder_matched_in_query = False 
-                for keyword_in_query, actual_folder_name in detected_folder_entity_map.items():
-                    if keyword_in_query in user_message_lower:
+                # matched_folder_filters et folder_matched_in_query sont initialisés en haut
+                for folder_name in available_folder_names:
+                    if folder_name.lower() in user_message_lower:
                         folder_matched_in_query = True
-                        matched_folder_filters.append({"folder_level_1": {"$eq": actual_folder_name}})
-                        matched_folder_filters.append({"folder_level_2": {"$eq": actual_folder_name}})
-                        matched_folder_filters.append({"folder_level_3": {"$eq": actual_folder_name}})
-                        matched_folder_filters.append({"last_folder_name": {"$eq": actual_folder_name}})
-
+                        matched_folder_filters.append({"folder_level_1": {"$eq": folder_name}})
+                        matched_folder_filters.append({"folder_level_2": {"$eq": folder_name}})
+                        matched_folder_filters.append({"folder_level_3": {"$eq": folder_name}})
+                        matched_folder_filters.append({"last_folder_name": {"$eq": folder_name}})
+                
                 if matched_folder_filters:
                     all_filters.append({"$or": matched_folder_filters})
-                    filter_applied_log += f" + Filtre Dossier/Entité"
+                    filter_applied_log += f" + Filtre Dossier Dynamique"
+
+                # detected_tab_names est initialisé en haut
+                month_year_pattern = re.compile(r"(mars|avril|mai|juin|juillet|août|septembre|octobre|novembre|décembre|janvier|février)\s*(\d{4})")
+                matches = month_year_pattern.findall(user_message_lower)
                 
+                for month_word, year_str in matches:
+                    month_mapping = {
+                        "janvier": "Janvier", "février": "Février", "mars": "Mars", "avril": "Avril",
+                        "mai": "Mai", "juin": "Juin", "juillet": "Juillet", "août": "Août",
+                        "septembre": "Septembre", "octobre": "Octobre", "novembre": "Novembre", "décembre": "Décembre"
+                    }
+                    if month_word in month_mapping:
+                        tab_name = f"statistiques {month_mapping[month_word]} {year_str}" 
+                        detected_tab_names.append(tab_name)
+                        
+                        tab_name_alt = f"{month_mapping[month_word]}_{year_str}"
+                        detected_tab_names.append(tab_name_alt)
+
+                if detected_tab_names:
+                    tab_filters = [{"tab": {"$eq": tab_name}} for tab_name in detected_tab_names]
+                    all_filters.append({"$or": tab_filters})
+                    filter_applied_log += f" + Filtre Tab: {', '.join(detected_tab_names)}"
+
                 table_keywords = ["tableau", "données", "statistiques", "feuille de calcul", "excel", "ods"]
                 table_keyword_in_query = any(keyword in user_message_lower for keyword in table_keywords)
 
-                if table_keyword_in_query or (folder_matched_in_query and "sporebio" in user_message_lower):
+                if table_keyword_in_query or (folder_matched_in_query and any(kw in user_message_lower for kw in ["sporebio", "sportlogiq"])): 
                     all_filters.append({"is_table_chunk": {"$eq": True}})
                     filter_applied_log += " + Filtre Tableau"
                     if not table_keyword_in_query: 
@@ -331,10 +298,16 @@ def chat():
                 current_app.logger.info(f"DEBUG RAG: Value of metadata_filter_dict before final check: {metadata_filter_dict}")
                 
                 try:
+                    k_value_for_retriever = 5 
+                    if detected_tab_names: 
+                        k_value_for_retriever = min(len(detected_tab_names) * 3, 10) 
+                        k_value_for_retriever = max(2, k_value_for_retriever) 
+                    elif folder_matched_in_query: 
+                         k_value_for_retriever = 5
+                    
                     if metadata_filter_dict: 
-                        k_value = 5 
-                        retriever_to_use = current_vectorstore.as_retriever(search_kwargs={"k": k_value, "filter": metadata_filter_dict})
-                        current_app.logger.info(f"DEBUG RAG: Utilisation du retriever filtré avec filtre: {filter_applied_log}")
+                        retriever_to_use = current_vectorstore.as_retriever(search_kwargs={"k": k_value_for_retriever, "filter": metadata_filter_dict})
+                        current_app.logger.info(f"DEBUG RAG: Utilisation du retriever filtré avec filtre: {filter_applied_log} (k={k_value_for_retriever})")
                     else: 
                         retriever_to_use = current_retriever
                         current_app.logger.warning("DEBUG RAG: Mode RAG sélectionné mais pas de filtre de métadonnées appliqué (possible erreur logique ou données). Utilisation du retriever global.")
@@ -347,8 +320,9 @@ def chat():
                         print(f"PRINT DEBUG RAG: Documents récupérés via retriever: {len(retrieved_docs)}")
                         for i, doc in enumerate(retrieved_docs):
                             source_info = doc.metadata.get('source', 'N/A') if isinstance(doc.metadata, dict) else 'N/A'
-                            current_app.logger.info(f"  Doc {i+1} (Source: {source_info}): '{doc.page_content[:100]}...'")
-                            print(f"PRINT DEBUG RAG:   Doc {i+1} (Source: {source_info}): '{doc.page_content[:100]}...'")
+                            tab_info = doc.metadata.get('tab', 'N/A') if isinstance(doc.metadata, dict) else 'N/A'
+                            current_app.logger.info(f"  Doc {i+1} (Source: {source_info}, Tab: {tab_info}): '{doc.page_content[:100]}...'")
+                            print(f"PRINT DEBUG RAG:   Doc {i+1} (Source: {source_info}, Tab: {tab_info}): '{doc.page_content[:100]}...'")
                     else:
                         current_app.logger.error("Retriever_to_use est None après la logique de sélection. Impossible d'invoquer.")
                         response_content = "Désolé, le retriever n'a pas pu être préparé."
@@ -417,15 +391,15 @@ def chat():
             response_content = "Désolé, une erreur interne est survenue lors de la génération de la réponse (format inattendu)."
 
         if isinstance(conv_id_from_request, int):
-            save_message(conv_id_from_request, "user", user_message)
-            save_message(conv_id_from_request, "bot", response_content)
-        elif isinstance(conv_id_from_request, str) and len(conv_id_from_request) == 36 and conv_id_from_request.count('-') == 4:
-            current_app.logger.info(f"Conversation éphémère (ID: {conv_id_from_request}), messages non sauvegardés en base de données.")
+            save_message(conv_id_from_request, "user", user_message) 
+            save_message(conv_id_from_request, "bot", response_content) 
+        elif session_key and len(session_key) == 36 and session_key.count('-') == 4: 
+            current_app.logger.info(f"Conversation éphémère (ID: {session_key}), messages non sauvegardés en base de données.")
         else:
             current_app.logger.info(f"Conversation éphémère (ID: {conv_id_from_request}), messages non sauvegardées en base de données.")
 
 
-        return jsonify({'response': response_content})
+        return jsonify({'response': response_content, 'conversation_id': session_key})
 
     except Exception as e:
         current_app.logger.error(f"Erreur fatale lors du traitement du chat: {e}")
@@ -438,19 +412,21 @@ def chat():
 @chat_bp.route('/conversations/<int:conv_id>', methods=['GET'])
 def get_conversation_messages(conv_id):
     from app import models 
-    messages = models.Message.query.filter_by(conversation_id=conv_id).order_by(models.Message.timestamp).all()
+    messages = models.Message.query.filter_by(conversation_id=conv_id).order_by(models.Message.timestamp).all() 
     return jsonify([{'sender': msg.sender, 'content': msg.content} for msg in messages])
 
 @chat_bp.route('/conversations/<int:conv_id>', methods=['DELETE'])
 def delete_conversation(conv_id):
-    from app import db, models 
+    from app import models 
     conv = models.Conversation.query.get(conv_id)
     if not conv:
         return jsonify({'error': 'Conversation non trouvée.'}), 404
     try:
+        from app import db 
         db.session.delete(conv)
         db.session.commit()
         return jsonify({'status': 'success', 'message': 'Conversation supprimée.'}), 200
     except Exception as e:
+        from app import db 
         db.session.rollback()
         return jsonify({'error': f'Erreur lors de la suppression de la conversation: {e}'}), 500
