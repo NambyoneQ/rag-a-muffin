@@ -1,27 +1,36 @@
 # app/services/rag_service.py
 
 import os
-import datetime
 import shutil
+import hashlib
+from datetime import datetime
+import mimetypes
+import re
 import traceback 
-from typing import List, Dict, Any, Optional 
 
-from flask import current_app 
-from langchain_community.vectorstores import Chroma
-from langchain_community.document_loaders import TextLoader, PyPDFLoader, UnstructuredWordDocumentLoader, UnstructuredODTLoader # UnstructuredExcelLoader sera retiré pour .xlsx
+# Langchain imports
+from langchain_community.document_loaders import PyPDFLoader, UnstructuredWordDocumentLoader, UnstructuredODTLoader, TextLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_core.documents import Document 
+from langchain_community.vectorstores import Chroma
+from langchain.docstore.document import Document
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.runnables import RunnablePassthrough
+from langchain_core.output_parsers import StrOutputParser
+from typing import List, Dict, Any, Tuple, Optional
 
-import openpyxl # NOUVEAU : Importation de openpyxl pour .xlsx
-import pyexcel_ods # NOUVEAU : Importation de pyexcel_ods pour .ods
+# Local imports
+from config import Config
+from app.services.llm_service import get_embeddings_llm 
 
-from app.models import DocumentStatus 
+# NEW: Import db and DocumentStatus model
+from app import db
+from app.models import DocumentStatus
 
-# Variables globales pour le vector store et le retriever (initialisées par initialize_vectorstore())
-_vectorstore: Optional[Chroma] = None 
-_retriever: Optional[Any] = None 
+import openpyxl
+import pyexcel_ods # Assurez-vous que c'est importé ici
 
-# Liste des extensions de fichiers à ignorer explicitement (médias, binaires, etc.)
+# Liste des extensions de fichiers binaires ou non textuels à exclure explicitement de la lecture de contenu.
+# Cette liste est utilisée pour éviter les erreurs de décodage et les tentatives d'ingestion inappropriées.
 EXCLUDED_EXTENSIONS = {
     '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp', # Images
     '.mp3', '.wav', '.ogg', '.flac', '.aac', # Audio
@@ -30,469 +39,973 @@ EXCLUDED_EXTENSIONS = {
     '.exe', '.dll', '.bin', '.dat', '.so', '.dylib', # Exécutables et bibliothèques
     '.ico', '.db', '.sqlite', '.log', '.bak', '.tmp', # Divers
     '.psd', '.ai', '.eps', # Fichiers Adobe
-    '.svg', # Images vectorielles (peuvent contenir du code, mais souvent visuelles)
-    '.json', '.xml', '.yml', '.yaml', '.csv', '.tsv', # Fichiers de données structurées (souvent texte, mais à double tranchant)
+    '.woff', '.woff2', '.ttf', '.otf', # Fonts
+    '.DS_Store', 'thumbs.db', # Fichiers système
+    '~$', # Fichiers temporaires Excel/Word
 }
 
-# FONCTION UTILITAIRE : Détermine le type de document et le charge
-def _load_document(file_path: str) -> List[Document]: 
-    current_app.logger.info(f"Tentative de chargement du fichier : {file_path}")
-    
-    file_extension = os.path.splitext(file_path)[1].lower() 
 
-    if file_extension in EXCLUDED_EXTENSIONS:
-        current_app.logger.info(f"Fichier ignoré (extension non-texte/code explicite) : {file_path}")
-        return [] 
+class RAGService:
+    def __init__(self):
+        self.embeddings = get_embeddings_llm() 
+        
+        self.chroma_path_kb = Config.CHROMA_PATH_KB 
+        self.chroma_path_codebase = Config.CHROMA_PATH_CODEBASE 
+        self.kb_documents_path = Config.KNOWLEDGE_BASE_DIR 
+        self.codebase_path = Config.CODE_BASE_DIR 
+        self.processing_cache_path = Config.PROCESSING_CACHE_PATH 
 
-    try:
-        if file_extension == '.pdf':
-            docs = PyPDFLoader(file_path).load()
-            current_app.logger.info(f"Chargé comme PDF : {file_path}")
-            return docs
-        elif file_extension == '.docx':
-            docs = UnstructuredWordDocumentLoader(file_path).load()
-            current_app.logger.info(f"Chargé comme DOCX : {file_path}")
-            return docs
-        elif file_extension == '.odt':
-            docs = UnstructuredODTLoader(file_path).load()
-            current_app.logger.info(f"Chargé comme ODT : {file_path}")
-            return docs
-        elif file_extension == '.xlsx':
-            # NOUVELLE LOGIQUE : Utilisation de openpyxl pour les fichiers XLSX
-            current_app.logger.info(f"Chargement XLSX avec openpyxl : {file_path}")
-            workbook = openpyxl.load_workbook(file_path, data_only=True) # data_only=True pour obtenir les valeurs calculées
-            
-            loaded_excel_docs: List[Document] = []
-            for sheet_name_in_wb in workbook.sheetnames:
-                sheet = workbook[sheet_name_in_wb]
+        self._initialize_directories()
+
+        self._any_db_reset = False 
+
+        # Initialise ou charge les vector stores et vérifie leur état
+        # _get_or_create_vector_store retourne l'instance Chroma et un booléen indiquant si elle était nouvelle ou vide
+        self.db_kb, kb_was_reset_or_empty = self._get_or_create_vector_store(self.chroma_path_kb)
+        self.db_codebase, codebase_was_reset_or_empty = self._get_or_create_vector_store(self.chroma_path_codebase)
+        
+        # Si une des bases de données a été réinitialisée ou est vide, force le nettoyage du cache
+        # Cela garantit que si l'utilisateur supprime manuellement 'chroma_db', une réingestion complète aura lieu.
+        if kb_was_reset_or_empty or codebase_was_reset_or_empty:
+            self._any_db_reset = True
+            print(f"Detected new/empty ChromaDB(s). Clearing processing cache at {self.processing_cache_path} to force full re-ingestion.")
+            if os.path.exists(self.processing_cache_path):
+                shutil.rmtree(self.processing_cache_path)
+            os.makedirs(self.processing_cache_path, exist_ok=True) # S'assurer qu'il existe après la suppression
+
+
+    def _initialize_directories(self):
+        os.makedirs(self.kb_documents_path, exist_ok=True)
+        os.makedirs(self.codebase_path, exist_ok=True)
+        os.makedirs(self.processing_cache_path, exist_ok=True)
+
+    def _get_or_create_vector_store(self, path: str) -> Tuple[Chroma, bool]:
+        """Initialise ou charge un vector store ChromaDB.
+        Retourne l'instance ChromaDB et un booléen (True si créée/vide, False si chargée avec des données existantes).
+        """
+        was_reset_or_empty = False
+        # Vérifie si le répertoire existe et est vide avant d'essayer de le charger comme existant
+        if not os.path.exists(path) or not os.listdir(path):
+            print(f"Creating new ChromaDB at {path}")
+            was_reset_or_empty = True
+            chroma_db = Chroma(embedding_function=self.embeddings, persist_directory=path)
+        else:
+            print(f"Loading existing ChromaDB from {path}")
+            chroma_db = Chroma(embedding_function=self.embeddings, persist_directory=path)
+            # Après le chargement, vérifie si elle est réellement vide de documents
+            if len(chroma_db.get(include=[])['ids']) == 0:
+                print(f"Existing ChromaDB at {path} found to be empty. Treating as if newly created.")
+                was_reset_or_empty = True 
+        return chroma_db, was_reset_or_empty
+
+    def _calculate_file_hash(self, file_path: str) -> str:
+        """Calcule le hash MD5 d'un fichier."""
+        hasher = hashlib.md5()
+        with open(file_path, 'rb') as f:
+            while True:
+                chunk = f.read(8192)  # Lire par blocs de 8KB
+                if not chunk:
+                    break
+                hasher.update(chunk)
+        return hasher.hexdigest()
+
+    def _get_cached_hash(self, file_path: str) -> Optional[str]:
+        """Récupère le hash d'un fichier depuis le cache (pour comparaison rapide, non critique)."""
+        cache_file_name = hashlib.md5(file_path.encode('utf-8')).hexdigest() + ".hash"
+        cache_file = os.path.join(self.processing_cache_path, cache_file_name)
+        if os.path.exists(cache_file):
+            with open(cache_file, 'r') as f:
+                return f.read().strip()
+        return None
+
+    def _save_cached_hash(self, file_path: str, file_hash: str):
+        """Sauvegarde le hash d'un fichier dans le cache."""
+        cache_file_name = hashlib.md5(file_path.encode('utf-8')).hexdigest() + ".hash"
+        cache_file = os.path.join(self.processing_cache_path, cache_file_name)
+        with open(cache_file, 'w') as f:
+                f.write(file_hash)
+
+    def _get_current_files(self, directory: str) -> Dict[str, Dict[str, Any]]:
+        """Récupère tous les chemins de fichiers valides dans un répertoire et ses sous-répertoires."""
+        current_files_on_disk: Dict[str, Dict[str, Any]] = {}
+        for root, _, files in os.walk(directory):
+            for file in files:
+                file_path = os.path.normpath(os.path.join(root, file)) 
+                file_extension = os.path.splitext(file_path)[1].lower()
                 
-                sheet_rows_data: List[List[str]] = []
-                for row in sheet.iter_rows():
-                    row_values = [str(cell.value if cell.value is not None else '').strip() for cell in row]
-                    if any(val for val in row_values): 
-                        sheet_rows_data.append(row_values)
+                # Exclusion précoce des fichiers binaires ou à ignorer pour éviter les erreurs de lecture
+                if file_extension in EXCLUDED_EXTENSIONS or file.startswith('~$'): 
+                    # print(f"Skipping file due to extension or temp status: {file_path}") # Uncomment for debug
+                    continue
                 
-                if sheet_rows_data:
-                    # Concaténer les lignes de la feuille en un seul texte pour le Document
-                    sheet_text_content = "\n".join(["\t".join(row_vals) for row_vals in sheet_rows_data])
-                    
-                    # Créer un Document LangChain pour chaque feuille
-                    doc_metadata = {'sheet_name': sheet_name_in_wb, 'source': file_path, 'file_type': 'kb'}
-                    if hasattr(sheet, 'title'): 
-                        doc_metadata['sheet_title'] = sheet.title
+                current_files_on_disk[file_path] = {'mtime': os.path.getmtime(file_path), 'size': os.path.getsize(file_path)}
+        return current_files_on_disk
 
-                    loaded_excel_docs.append(Document(page_content=sheet_text_content, metadata=doc_metadata))
-                else:
-                    current_app.logger.info(f"  Feuille '{sheet_name_in_wb}' de {file_path} est vide. Ignorée.")
-            
-            return loaded_excel_docs
+    def _load_document(self, file_path: str) -> List[Document]:
+        """Charge un document en fonction de son type de fichier."""
+        print(f"Loading document: {file_path}")
 
-        elif file_extension == '.ods': # NOUVEAU : Logique pour les fichiers ODS
-            current_app.logger.info(f"Chargement ODS avec pyexcel-ods : {file_path}")
-            # get_data retourne un OrderedDict où les clés sont les noms de feuilles et les valeurs sont des listes de listes
-            ods_data = pyexcel_ods.get_data(file_path)
+        file_extension = os.path.splitext(file_path)[1].lower() 
+        
+        # Double vérification pour les fichiers exclus.
+        if file_extension in EXCLUDED_EXTENSIONS:
+            print(f"Skipping file due to excluded extension (redundant check in loader): {file_path}")
+            return []
 
-            loaded_ods_docs: List[Document] = []
-            for sheet_name_in_wb, sheet_rows_data_raw in ods_data.items():
-                
-                sheet_rows_data: List[List[str]] = []
-                for row_raw in sheet_rows_data_raw:
-                    row_values = [str(cell_val if cell_val is not None else '').strip() for cell_val in row_raw]
-                    if any(val for val in row_values): 
-                        sheet_rows_data.append(row_values)
-                
-                if sheet_rows_data:
-                    # Concaténer les lignes de la feuille en un seul texte pour le Document
-                    sheet_text_content = "\n".join(["\t".join(row_vals) for row_vals in sheet_rows_data])
-                    
-                    doc_metadata = {'sheet_name': sheet_name_in_wb, 'source': file_path, 'file_type': 'kb'}
-                    # pyexcel_ods ne fournit pas d'attribut 'title' comme openpyxl, pas de doc_metadata['sheet_title'] ici
-                    
-                    loaded_ods_docs.append(Document(page_content=sheet_text_content, metadata=doc_metadata))
-                else:
-                    current_app.logger.info(f"  Feuille '{sheet_name_in_wb}' de {file_path} est vide. Ignorée.")
-            
-            return loaded_ods_docs
-
-        else: 
-            loader = TextLoader(file_path, encoding='utf-8', autodetect_encoding=True)
-            docs = loader.load()
-            current_app.logger.info(f"Chargé comme texte brut (code/texte) : {file_path}")
-            return docs
-    except Exception as e:
-        current_app.logger.warning(f"Impossible de charger '{file_path}' (extension '{file_extension}') : {e}. Fichier ignoré.")
-        current_app.logger.warning("Cela peut être dû à un format non pris en charge, un fichier corrompu ou un problème d'encodage/dépendance (ex: LibreOffice pour .odt).")
-        return [] 
-
-# Fonction pour initialiser le Vector Store et le Retriever
-def initialize_vectorstore(app_instance): 
-    global _vectorstore, _retriever
-    from app import db 
-
-    chroma_dir = app_instance.config['CHROMA_PERSIST_DIRECTORY']
-    app_instance.logger.info(f"Vérification ou création du Vector Store ChromaDB dans '{chroma_dir}'...")
-
-    embeddings_llm_instance = app_instance.extensions["llm_service"]["embeddings_llm"]
-    if embeddings_llm_instance is None:
-        app_instance.logger.error("Erreur: Le modèle d'embeddings n'est pas disponible via app.extensions. Impossible de créer le Vector Store.")
-        raise RuntimeError("Embeddings LLM not initialized or not accessible via app.extensions.")
-
-    chroma_dir_existed_before_init_attempt = os.path.exists(chroma_dir) and os.listdir(chroma_dir)
-
-    with db.session.begin(): 
         try:
-            _vectorstore = Chroma(
-                persist_directory=chroma_dir,
-                embedding_function=embeddings_llm_instance
-            )
-            app_instance.logger.info(f"Vector Store ChromaDB chargé/rechargé depuis '{chroma_dir}'.")
+            if file_extension == '.pdf':
+                loader = PyPDFLoader(file_path)
+                docs = loader.load()
+            elif file_extension == '.txt':
+                loader = TextLoader(file_path, encoding='utf-8')
+                docs = loader.load()
+            elif file_extension in (".docx", ".doc"):
+                loader = UnstructuredWordDocumentLoader(file_path)
+                docs = loader.load()
+            elif file_extension == ".odt":
+                loader = UnstructuredODTLoader(file_path)
+                docs = loader.load()
+            elif file_extension == ".xlsx":
+                # Handle Excel files manually to extract text from all sheets, each as a separate Document
+                workbook = openpyxl.load_workbook(file_path, data_only=True)
+                docs_for_file = []
+                for sheet_name in workbook.sheetnames:
+                    sheet = workbook[sheet_name]
+                    sheet_rows_data = []
+                    for row in sheet.iter_rows():
+                        row_values = [str(cell.value) if cell.value is not None else "" for cell in row]
+                        sheet_rows_data.append("\t".join(row_values))
+                    
+                    if sheet_rows_data:
+                        sheet_content = f"Feuille: {sheet_name}\n" + "\n".join(sheet_rows_data)
+                        # Metadata for each sheet
+                        metadata = {
+                            "source": os.path.abspath(file_path), 
+                            "file_type": "kb", 
+                            "sheet_name": sheet_name,
+                            "is_table_chunk": True 
+                        }
+                        docs_for_file.append(Document(page_content=sheet_content, metadata=metadata))
+                return docs_for_file 
+            elif file_extension == ".ods":
+                # Handle ODS files manually, each sheet as a separate Document
+                ods_data = pyexcel_ods.get_data(file_path) 
+                docs_for_file = [] 
+                for sheet_name, table_data in ods_data.items():
+                    sheet_rows_data = []
+                    for row in table_data:
+                        row_values = [str(cell) if cell is not None else "" for cell in row]
+                        sheet_rows_data.append("\t".join(row_values)) 
+                    
+                    if sheet_rows_data:
+                        sheet_content = f"Feuille: {sheet_name}\n" + "\n".join(sheet_rows_data)
+                        # Metadata for each sheet
+                        metadata = {
+                            "source": os.path.abspath(file_path), 
+                            "file_type": "kb", 
+                            "sheet_name": sheet_name,
+                            "is_table_chunk": True 
+                        }
+                        docs_for_file.append(Document(page_content=sheet_content, metadata=metadata))
+                return docs_for_file 
+            else:
+                loader = TextLoader(file_path, encoding='utf-8', autodetect_encoding=True)
+                docs = loader.load()
 
-            if not chroma_dir_existed_before_init_attempt:
-                db.session.query(DocumentStatus).delete()
-                app_instance.logger.info("Anciens statuts de documents effacés car nouveau Vector Store.")
+            for doc in docs:
+                doc.metadata["source"] = os.path.abspath(file_path)
+                doc.metadata["file_type"] = "kb" 
+            return docs
 
         except Exception as e:
-            app_instance.logger.error(f"Erreur lors du chargement ou de la création du Vector Store: {e}. Tentative de ré-initialisation complète.")
-            if os.path.exists(chroma_dir):
-                shutil.rmtree(chroma_dir)
-            _vectorstore = Chroma(
-                embedding_function=embeddings_llm_instance,
-                persist_directory=chroma_dir
-            )
-            db.session.query(DocumentStatus).delete()
-            app_instance.logger.info("Vector Store complètement recréé suite à une erreur.")
+            print(f"Error loading {file_path}: {e}. Skipping this file.")
+            return []
 
-        try:
-            _update_vectorstore_from_disk(app_instance)
-        except RuntimeError as e:
-            app_instance.logger.error(f"Erreur critique lors de la mise à jour incrémentale du Vector Store: {e}")
-            _vectorstore = None
-            _retriever = None
-            return
-
-    if _vectorstore is not None:
-        current_chunk_count = _vectorstore._collection.count() 
-        app_instance.logger.info(f"Nombre de chunks actuel dans le Vector Store après mise à jour: {current_chunk_count}")
-
-        if current_chunk_count > 0:
-            _retriever = _vectorstore.as_retriever(search_kwargs={"k": 5}) 
-            app_instance.logger.info("Vector Store (RAG) initialisé et Retriever prêt.")
-        else:
-            app_instance.logger.info("Vector Store vide. RAG sera désactivé temporairement.")
-            _retriever = None
-    else:
-        app_instance.logger.error("Le Vector Store n'a pas put être initialisé. Le RAG sera désactivé.")
-        _retriever = None
-
-# Fonction interne pour le traitement incrémental des documents
-def _update_vectorstore_from_disk(app_instance): 
-    global _vectorstore, _retriever
-    from app import db 
-
-    app_instance.logger.info("Début du processus de mise à jour incrémentale des documents.")
-
-    embeddings_llm_instance = app_instance.extensions["llm_service"]["embeddings_llm"]
-    if embeddings_llm_instance is None:
-        app_instance.logger.error("Erreur: Le modèle d'embeddings n'est pas disponible via app.extensions. Impossible de traiter les documents.")
-        raise RuntimeError("Embeddings LLM not initialized or not accessible via app.extensions for document processing.")
-
-    if _vectorstore is None:
-        app_instance.logger.error("Vector Store n'est pas disponible pour la mise à jour incrémentale. Impossible de traiter les documents.")
-        return
-
-    kb_dir = app_instance.config['KNOWLEDGE_BASE_DIR']
-    code_dir = app_instance.config['CODE_BASE_DIR']
-    
-    APP_EXCLUSIONS_RELATIVE_TO_ROOT = [
-        'app',                 
-        'run.py',              
-        'config.py',           
-        '.env',                
-        '.env.example',
-        '.gitignore',
-        'requirements.txt',
-        'chroma_db',           
-        'venv',                
-        '.git'                 
-    ]
-    EXCLUDED_ABS_PATHS_NORMALIZED = [
-        os.path.normpath(os.path.join(current_app.root_path, str(p))) 
-        for p in APP_EXCLUSIONS_RELATIVE_TO_ROOT
-    ]
-    
-    app_instance.logger.info(f"Fichiers/Dossiers de l'application à exclure de l'indexation : {EXCLUDED_ABS_PATHS_NORMALIZED}")
-
-
-    current_files_on_disk: Dict[str, Dict[str, Any]] = {} 
-    
-    # Gérer les répertoires de base de connaissances
-    if not os.path.exists(kb_dir):
-        app_instance.logger.info(f"ATTENTION: Le dossier de base de connaissances '{kb_dir}' n'existe pas. Création...")
-        os.makedirs(kb_dir)
-        app_instance.logger.info("Veuillez y placer des documents (fichiers .txt ou .pdf) pour que le RAG fonctionne.")
-    for root, _, files in os.walk(kb_dir):
-        for file in files:
-            file_path = os.path.join(root, file)
-            normalized_file_path = os.path.normpath(file_path) 
-
-            if any(str(normalized_file_path).startswith(ep) for ep in EXCLUDED_ABS_PATHS_NORMALIZED): 
-                app_instance.logger.info(f"Exclusion (KB - code application) : {file_path}")
-                continue
-            
-            current_files_on_disk[file_path] = {'mtime': os.path.getmtime(file_path), 'type': 'kb'}
-
-    # Gérer les répertoires de code
-    if not os.path.exists(code_dir):
-        app_instance.logger.info(f"ATTENTION: Le dossier de code '{code_dir}' n'existe pas. Création...")
-        os.makedirs(code_dir)
-        app_instance.logger.info("Veuillez y placer vos bases de code organisées par projet.")
-    for root, dirs, files in os.walk(code_dir):
-        dirs[:] = [d for d in dirs if d not in ['.git', 'venv', '__pycache__', 'chroma_db']] 
+    def _process_documents(self, directory: str, file_type: str, db_instance: Chroma):
+        """Generic processor for both KB and Codebase documents."""
+        print(f"Processing {file_type.capitalize()} documents from {directory}...")
+        current_files_on_disk = self._get_current_files(directory) # Uses EXCLUDED_EXTENSIONS
         
-        for file in files:
-            file_path = os.path.join(root, file)
-            normalized_file_path = os.path.normpath(file_path) 
-            
-            if any(str(normalized_file_path).startswith(ep) for ep in EXCLUDED_ABS_PATHS_NORMALIZED): 
-                app_instance.logger.info(f"Exclusion (Codebase - code application) : {file_path}")
-                continue
-
-            current_files_on_disk[file_path] = {'mtime': os.path.getmtime(file_path), 'type': 'code'}
+        # Fetch all DocumentStatus entries for this file_type from DB
+        print(f"DEBUG DB: Fetching existing DocumentStatus entries for file_type='{file_type}'.")
+        stored_db_status: Dict[str, DocumentStatus] = {
+            os.path.normpath(ds.file_path): ds 
+            for ds in DocumentStatus.query.filter_by(file_type=file_type).all()
+        }
+        print(f"DEBUG DB: Found {len(stored_db_status)} existing DocumentStatus entries for '{file_type}'.")
 
 
-    # 2. Charger l'état des documents indexés dans la base de données (DocumentStatus)
-    indexed_documents_status = {doc.file_path: doc for doc in db.session.query(DocumentStatus).all()} 
+        files_to_add_or_update_paths: set[str] = set()
+        files_to_delete_from_db_paths: set[str] = set(stored_db_status.keys()) # Start with all known paths from DB
 
-    documents_to_add: List[str] = [] 
-    chunks_to_delete_from_chroma_sources: List[str] = [] 
-
-    for indexed_path, status_entry in indexed_documents_status.items():
-        file_is_on_disk = indexed_path in current_files_on_disk
-        file_is_excluded_now = any(os.path.normpath(str(indexed_path)).startswith(ep) for ep in EXCLUDED_ABS_PATHS_NORMALIZED) 
-
-        if not file_is_on_disk or file_is_excluded_now:
-            app_instance.logger.info(f"Document supprimé du disque ou maintenant exclu: {indexed_path}. Suppression de ChromaDB et BDD.")
-            chunks_to_delete_from_chroma_sources.append(indexed_path)
-            db.session.delete(status_entry)
-        elif db.session.query(DocumentStatus).filter_by(file_path=indexed_path).first() and current_files_on_disk[indexed_path]['mtime'] > status_entry.last_modified.timestamp():
-            app_instance.logger.info(f"Document modifié: {indexed_path}. Ré-ingestion.")
-            chunks_to_delete_from_chroma_sources.append(indexed_path)
-            documents_to_add.append(indexed_path)
-            
-    if chunks_to_delete_from_chroma_sources:
-        for path_source in chunks_to_delete_from_chroma_sources:
-            app_instance.logger.info(f"Tentative de suppression de la source: {path_source} de ChromaDB.")
-            _vectorstore.delete(where={"source": path_source})
-        app_instance.logger.info(f"Suppression de {len(chunks_to_delete_from_chroma_sources)} documents obsolètes de ChromaDB et BDD de suivi.")
-
-    for disk_path, disk_info in current_files_on_disk.items():
-        if disk_path not in indexed_documents_status:
-            app_instance.logger.info(f"Nouveau document détecté: {disk_path}. Ingestion.")
-            documents_to_add.append(disk_path)
-
-    if documents_to_add:
+        # Statistics for summary
+        num_new_files = 0
+        num_modified_files = 0
+        num_error_files = 0
+        num_skipped_files = 0
+        num_deleted_files = 0
+        
+        # Initialize all_chunks_to_add_in_this_run to an empty list here
         all_chunks_to_add_in_this_run: List[Document] = [] 
 
-        for file_path in documents_to_add:
-            try:
-                loaded_docs = _load_document(file_path)
-                if not loaded_docs:
-                    current_app.logger.warning(f"Aucun document chargé pour {file_path}. Skipping.")
-                    continue 
+        # Phase 1: Identify files to ADD or UPDATE
+        for file_path_on_disk in current_files_on_disk.keys(): 
+            # If the file still exists on disk, remove it from the 'to_delete' set
+            if file_path_on_disk in files_to_delete_from_db_paths:
+                files_to_delete_from_db_paths.remove(file_path_on_disk) 
 
-                file_size_bytes = os.path.getsize(file_path)
-                file_extension = os.path.splitext(file_path)[1].lower()
+            current_file_hash = self._calculate_file_hash(file_path_on_disk)
+            
+            needs_processing = False
+            doc_status_entry = stored_db_status.get(file_path_on_disk)
 
-                # --- TRAITEMENT DES DOCUMENTS PAR TYPE DE FICHIER (y compris XLSX et ODS) ---
-                if file_extension in ['.xlsx', '.ods']: # Maintenant aussi pour les fichiers ODS
-                    app_instance.logger.info(f"Traitement des feuilles de calcul individuelles pour {file_path} (extension: {file_extension})")
+            # Decision logic for 'needs_processing':
+            if self._any_db_reset:
+                # Scenario 1: ChromaDB was just cleared (manual deletion of chroma_db folder).
+                # Force re-processing of ALL files to rebuild from scratch.
+                needs_processing = True
+            elif doc_status_entry:
+                # Scenario 2: File is known in DocumentStatus DB. Check its stored hash and status.
+                assert doc_status_entry is not None # Pylance fix
+                if current_file_hash != doc_status_entry.file_hash:
+                    needs_processing = True
+                    num_modified_files += 1
+                elif doc_status_entry.status != 'indexed':
+                    # Re-process errored/skipped files (if their hash didn't change, but status isn't indexed)
+                    needs_processing = True
+                    # No need to increment error/skipped count here, it will be handled in Phase 3 if it fails again
+            else:
+                # Scenario 3: File is NOT known in DocumentStatus DB -> it's a new file.
+                needs_processing = True
+                num_new_files += 1
+            
+            if needs_processing:
+                files_to_add_or_update_paths.add(file_path_on_disk)
+                self._save_cached_hash(file_path_on_disk, current_file_hash) # Update cache for faster restarts
+
+
+        # Phase 2: Delete documents no longer present on disk
+        for file_path_to_delete in files_to_delete_from_db_paths:
+            print(f"Deleting removed {file_type.capitalize()} document from ChromaDB: {file_path_to_delete}")
+            db_instance.delete(where={"source": file_path_to_delete}) 
+
+            # Delete from DocumentStatus table
+            doc_status_entry = stored_db_status.get(file_path_to_delete)
+            if doc_status_entry:
+                db.session.delete(doc_status_entry)
+                num_deleted_files += 1
+            
+            # Remove hash from cache as well
+            cache_file_name = hashlib.md5(file_path_to_delete.encode('utf-8')).hexdigest() + ".hash"
+            cache_file = os.path.join(self.processing_cache_path, cache_file_name)
+            if os.path.exists(cache_file):
+                os.remove(cache_file)
+
+
+        # Phase 3: Load, chunk, and add/update documents in ChromaDB and DocumentStatus
+        if files_to_add_or_update_paths:
+            # all_chunks_to_add_in_this_run: List[Document] = [] # Moved initialization outside for scope
+            
+            for file_path_to_process in files_to_add_or_update_paths:
+                status_entry_for_file = stored_db_status.get(file_path_to_process) 
+                
+                try:
+                    current_file_hash = self._calculate_file_hash(file_path_to_process) 
+                    loaded_docs: List[Document] = []
                     
-                    for doc_element in loaded_docs: # Chaque doc_element est un Document LangChain d'une feuille
-                        sheet_name = doc_element.metadata.get('sheet_name')
-                        if sheet_name is None: 
-                            sheet_name = os.path.splitext(os.path.basename(file_path))[0]
-                        doc_element.metadata['tab'] = sheet_name 
-
-                        app_instance.logger.info(f"DEBUG RAG: Traitement de la feuille '{sheet_name}' de {file_path}")
-
-                        consolidated_content_from_sheet = doc_element.page_content 
-                        lines = [line.strip() for line in consolidated_content_from_sheet.split('\n') if line.strip()]
+                    if file_type == 'kb':
+                        loaded_docs = self._load_document(file_path_to_process)
+                        final_chunks_for_file = []
+                        text_splitter = RecursiveCharacterTextSplitter(chunk_size=Config.CHUNK_SIZE, chunk_overlap=Config.CHUNK_OVERLAP)
+                        for doc in loaded_docs:
+                            if doc.metadata.get('is_table_chunk'): 
+                                final_chunks_for_file.append(doc)
+                            else: 
+                                split_docs = text_splitter.split_documents([doc])
+                                final_chunks_for_file.extend(split_docs)
                         
-                        infos_index = -1
-                        for i, line in enumerate(lines):
-                            if "infos" == line.lower(): # Recherche exacte "infos" (insensible à la casse) sur la ligne
-                                infos_index = i
-                                break
-
-                        pre_infos_content = ""
-                        table_headers: List[str] = []
-                        table_data_lines: List[str] = []
-
-                        if infos_index != -1:
-                            # Contenu AVANT "Infos" (exclure la ligne "Infos" elle-même)
-                            pre_infos_content = "\n".join(lines[:infos_index]).strip()
-                            if pre_infos_content:
-                                pre_table_doc = Document(page_content=pre_infos_content, metadata=doc_element.metadata.copy())
-                                pre_table_doc.metadata['chunk_type'] = "pre_table_context"
-                                pre_table_doc.metadata['tab'] = sheet_name 
-                                pre_table_doc.metadata['is_table_chunk'] = True 
-                                _add_hierarchical_metadata(pre_table_doc, file_path, current_files_on_disk[file_path]['type'])
-                                all_chunks_to_add_in_this_run.append(pre_table_doc)
-                                app_instance.logger.info(f"Créé chunk 'pre_table_context' pour '{sheet_name}' de {file_path}")
-
-                            # Contenu APRÈS "Infos"
-                            post_infos_lines = lines[infos_index + 1:]
-                            
-                            if post_infos_lines:
-                                potential_header_line = post_infos_lines[0]
-                                
-                                # Tenter de parser comme des en-têtes séparés par '|'
-                                if '|' in potential_header_line:
-                                    table_headers = [h.strip() for h in potential_header_line.split('|') if h.strip()]
-                                    table_data_lines = post_infos_lines[1:] # Les données commencent après la ligne d'en-tête
-                                    app_instance.logger.info(f"DEBUG RAG: En-têtes détectés par '|': {table_headers}")
-                                else:
-                                    # Si pas de '|', et ce n'est pas vide, alors c'est la première ligne de données
-                                    # ou un en-tête non formaté. On utilise un en-tête générique.
-                                    table_headers = ['Donnée'] 
-                                    table_data_lines = post_infos_lines # Toutes les lignes restantes sont des données
-                                    app_instance.logger.info(f"DEBUG RAG: Pas de '|' détecté dans l'en-tête potentiel. En-tête générique utilisé.")
-
-                            table_data_lines = [line for line in table_data_lines if "infos" not in line.lower()]
-
-                        else: # Pas de "Infos" trouvé dans cette feuille
-                            full_sheet_text_without_infos = "\n".join(lines).strip()
-                            if full_sheet_text_without_infos:
-                                doc = Document(page_content=full_sheet_text_without_infos, metadata=doc_element.metadata.copy())
-                                doc.metadata['chunk_type'] = "full_sheet_context" 
-                                doc.metadata['tab'] = sheet_name 
-                                doc.metadata['is_table_chunk'] = True 
-                                _add_hierarchical_metadata(doc, file_path, current_files_on_disk[file_path]['type'])
-                                all_chunks_to_add_in_this_run.append(doc)
-                                app_instance.logger.info(f"Créé chunk 'full_sheet_context' pour '{sheet_name}' de {file_path} (pas d'Infos)")
-                            else:
-                                app_instance.logger.info(f"Feuille '{sheet_name}' est vide après nettoyage. Ignorée.")
-                            table_data_lines = [] 
-                            table_headers = []
-
-                        # Formater les données de tableau structurées en chunks Markdown
-                        if table_headers and table_data_lines:
-                            markdown_table_header_line = "| " + " | ".join(table_headers) + " |\n"
-                            markdown_table_separator_line = "|-" + "-|-".join(['-' * len(h) for h in table_headers]) + "-|\n"
-                            
-                            current_markdown_rows: List[str] = []
-                            MAX_CHUNK_CHARS = 4000 * 4 
-
-                            initial_chunk_content_header = f"Données tabulaires extraites (feuille '{sheet_name or 'N/A'}'):\n" + \
-                                                         markdown_table_header_line + markdown_table_separator_line
-                            
-                            current_chunk_chars = len(initial_chunk_content_header) 
-
-                            for row_line in table_data_lines:
-                                row_line_stripped = row_line.strip()
-                                if not row_line_stripped: continue 
-
-                                formatted_row_for_markdown = "| " + " | ".join(row_line_stripped.split('\t')) + " |" 
-
-                                if current_chunk_chars + len(formatted_row_for_markdown) + 1 > MAX_CHUNK_CHARS and current_markdown_rows:
-                                    structured_content = initial_chunk_content_header + "\n".join(current_markdown_rows)
-                                    
-                                    structured_doc = Document(page_content=structured_content, metadata=doc_element.metadata.copy())
-                                    structured_doc.metadata['is_table_chunk'] = True
-                                    structured_doc.metadata['chunk_type'] = "structured_table_data"
-                                    structured_doc.metadata['tab'] = sheet_name 
-                                    _add_hierarchical_metadata(structured_doc, file_path, current_files_on_disk[file_path]['type'])
-                                    all_chunks_to_add_in_this_run.append(structured_doc)
-                                    app_instance.logger.info(f"Créé chunk 'structured_table_data' pour '{sheet_name}' de {file_path} (partie)")
-
-                                    current_markdown_rows = []
-                                    current_chunk_chars = len(initial_chunk_content_header) 
-
-                                current_markdown_rows.append(formatted_row_for_markdown)
-                                current_chunk_chars += len(formatted_row_for_markdown) + 1 
-
-                            if current_markdown_rows:
-                                structured_content = initial_chunk_content_header + "\n".join(current_markdown_rows)
-                                structured_doc = Document(page_content=structured_content, metadata=doc_element.metadata.copy())
-                                structured_doc.metadata['is_table_chunk'] = True
-                                structured_doc.metadata['chunk_type'] = "structured_table_data"
-                                structured_doc.metadata['tab'] = sheet_name 
-                                _add_hierarchical_metadata(structured_doc, file_path, current_files_on_disk[file_path]['type'])
-                                all_chunks_to_add_in_this_run.append(structured_doc)
-                                app_instance.logger.info(f"Créé dernier chunk 'structured_table_data' pour '{sheet_name}' de {file_path}")
-                        else:
-                            app_instance.logger.warning(f"Aucune donnée de tableau structurable trouvée (après 'Infos' ou pas d'en-têtes/données valides) pour la feuille '{sheet_name}' de {file_path}.")
-
-                else: # Traitement pour les documents non-Excel (texte, PDF, etc.)
-                    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-                    temp_chunks = text_splitter.split_documents(loaded_docs) 
-                    for chunk in temp_chunks:
-                        _add_hierarchical_metadata(chunk, file_path, current_files_on_disk[file_path]['type'])
-                        all_chunks_to_add_in_this_run.append(chunk)
-
-                mtime = os.path.getmtime(file_path)
-                timestamp_mtime = datetime.datetime.fromtimestamp(mtime)
-
-                if file_path in indexed_documents_status:
-                    status_entry = indexed_documents_status[file_path]
-                    status_entry.last_modified = timestamp_mtime 
-                    status_entry.indexed_at = datetime.datetime.now() 
-                else:
-                    status_entry = DocumentStatus(
-                        file_path=file_path, 
-                        last_modified=timestamp_mtime, 
-                        indexed_at=datetime.datetime.now()
-                    ) 
-                    db.session.add(status_entry) 
-
-            except Exception as e:
-                app_instance.logger.error(f"Erreur lors de la lecture/traitement de {file_path}: {e}. Ce document sera ignoré.")
-                app_instance.logger.error(f"TRACEBACK TABLE PROCESSING ERROR: \n{traceback.format_exc()}")
-                pass 
-
-        if all_chunks_to_add_in_this_run: 
-            app_instance.logger.info(f"Ajout de {len(all_chunks_to_add_in_this_run)} nouveaux chunks à ChromaDB.")
-            _vectorstore.add_documents(all_chunks_to_add_in_this_run) 
-            _vectorstore.persist() 
-            app_instance.logger.info("Nouveaux chunks ajoutés et statuts de documents mis à jour.")
+                        for chunk in final_chunks_for_file:
+                            self._add_hierarchical_metadata(chunk, file_path_to_process, file_type)
+                        all_chunks_to_add_in_this_run.extend(final_chunks_for_file)
 
 
-# --- NOUVELLE FONCTION : AJOUTE LES MÉTA-DONNÉES HIÉRARCHIQUES ---
-def _add_hierarchical_metadata(doc: Document, file_path: str, file_type: str): 
-    """Ajoute les métadonnées de dossier et de nom de fichier/titre au chunk."""
-    base_dir = current_app.config['KNOWLEDGE_BASE_DIR'] if file_type == 'kb' else current_app.config['CODE_BASE_DIR']
+                    elif file_type == 'code':
+                        file_extension = os.path.splitext(file_path_to_process)[1].lower()
+                        if file_extension in EXCLUDED_EXTENSIONS:
+                            # This should ideally be caught by _get_current_files, but serves as a failsafe
+                            print(f"Skipping codebase file {file_path_to_process} as it's detected as binary/unsupported type.")
+                            raise ValueError("Binary file detected, cannot read as text.")
+
+                        with open(file_path_to_process, 'r', encoding='utf-8') as f:
+                            code_content = f.read()
+                        chunks = self._split_code_into_chunks(code_content, file_path_to_process, self._detect_language(file_path_to_process))
+                        all_chunks_to_add_in_this_run.extend(chunks)
+
+                    # Update DocumentStatus after successful processing
+                    # print(f"DEBUG DB: Preparing to add/update DocumentStatus for {file_path_to_process} (SUCCESS).") # Verbose
+                    if status_entry_for_file:
+                        status_entry_for_file.status = 'indexed'
+                        status_entry_for_file.indexed_at = datetime.now()
+                        status_entry_for_file.file_hash = current_file_hash
+                        status_entry_for_file.last_modified = datetime.fromtimestamp(os.path.getmtime(file_path_to_process))
+                        status_entry_for_file.error_message = None
+                        db.session.add(status_entry_for_file) 
+                    else:
+                        new_entry = DocumentStatus(
+                            file_path=file_path_to_process,
+                            file_type=file_type,
+                            status='indexed',
+                            last_modified=datetime.fromtimestamp(os.path.getmtime(file_path_to_process)),
+                            indexed_at=datetime.now(),
+                            file_hash=current_file_hash,
+                            error_message=None
+                        )
+                        db.session.add(new_entry)
+
+                except Exception as e:
+                    print(f"Error processing {file_type} file {file_path_to_process}: {e}")
+                    traceback.print_exc() 
+                    
+                    error_status = 'error'
+                    error_message = str(e)
+                    if "cannot read as text" in str(e).lower() or "codec can't decode" in str(e).lower() or \
+                       "file is not a zip file" in str(e).lower(): 
+                        error_status = 'skipped'
+                        error_message = "File is binary or malformed, skipped for text processing."
+                        num_skipped_files += 1 # Increment skipped count if it's a binary/malformed file
+                    else:
+                        num_error_files += 1 # Increment error count for other processing issues
+
+                    current_file_hash_on_error = self._calculate_file_hash(file_path_to_process) 
+                    if status_entry_for_file:
+                        status_entry_for_file.status = error_status
+                        status_entry_for_file.indexed_at = datetime.now()
+                        status_entry_for_file.file_hash = current_file_hash_on_error
+                        status_entry_for_file.last_modified = datetime.fromtimestamp(os.path.getmtime(file_path_to_process))
+                        status_entry_for_file.error_message = error_message
+                        db.session.add(status_entry_for_file)
+                    else:
+                        new_entry = DocumentStatus(
+                            file_path=file_path_to_process,
+                            file_type=file_type,
+                            status=error_status,
+                            last_modified=datetime.fromtimestamp(os.path.getmtime(file_path_to_process)),
+                            indexed_at=datetime.now(),
+                            file_hash=current_file_hash_on_error,
+                            error_message=error_message
+                        )
+                        db.session.add(new_entry)
+            
+            # Perform ChromaDB operations for this batch of files
+            if all_chunks_to_add_in_this_run: # Only if there are chunks to add
+                # print(f"Adding {len(all_chunks_to_add_in_this_run)} {file_type} chunks to ChromaDB.") # Verbose
+                sources_to_clear_in_chroma = {os.path.normpath(c.metadata['source']) for c in all_chunks_to_add_in_this_run}
+                for source_path in sources_to_clear_in_chroma:
+                    db_instance.delete(where={"source": source_path})
+                    # print(f"  -> Cleared existing chunks for {source_path} in ChromaDB.") # Verbose
+                
+                db_instance.add_documents(all_chunks_to_add_in_this_run)
+                # print(f"Successfully added new/updated {file_type} chunks to ChromaDB.") # Verbose
+        # else: # No chunks to add for this batch of files, due to errors or empty content
+            # print(f"No {file_type} documents resulted in chunks to add after processing.") # Verbose
+
+        # Summary of processing
+        total_files_on_disk = len(current_files_on_disk)
+        
+        # Recalculate actual counts from DB AFTER processing for accurate summary
+        # Note: These counts are for files *currently* in the DB, not just those modified in this run.
+        # They reflect the state AFTER db.session.add/delete operations (before the final commit).
+        total_indexed_in_db = DocumentStatus.query.filter_by(file_type=file_type, status='indexed').count()
+        total_errored_in_db = DocumentStatus.query.filter_by(file_type=file_type, status='error').count()
+        total_skipped_in_db = DocumentStatus.query.filter_by(file_type=file_type, status='skipped').count()
+        
+        print(f"\n--- {file_type.capitalize()} Processing Summary ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')}) ---")
+        print(f"Files currently on disk: {total_files_on_disk}")
+        print(f"Files known in DocumentStatus (at start of this run): {len(stored_db_status)}")
+        
+        if num_new_files > 0:
+            print(f"  - New files added to DB: {num_new_files}")
+        if num_modified_files > 0:
+            print(f"  - Modified files re-indexed: {num_modified_files}")
+        if len(files_to_delete_from_db_paths) > 0:
+            print(f"  - Files deleted from disk: {len(files_to_delete_from_db_paths)} (removed from ChromaDB & DocumentStatus)")
+        
+        # This count now comes from the actual list of chunks accumulated
+        print(f"  - Total chunks added/updated in ChromaDB this run: {len(all_chunks_to_add_in_this_run)}")
+        
+        print(f"Current DocumentStatus counts (after this run's operations, before final commit):")
+        print(f"  - Successfully Indexed: {total_indexed_in_db}")
+        print(f"  - With Errors: {total_errored_in_db}")
+        print(f"  - Skipped (e.g., binary): {total_skipped_in_db}")
+        print(f"--- End {file_type.capitalize()} Summary ---")
+
+
+    # These are now private helper methods used by _process_documents
+    def _process_kb_documents(self):
+        self._process_documents(self.kb_documents_path, 'kb', self.db_kb)
+
+    def _process_codebase_documents(self):
+        self._process_documents(self.codebase_path, 'code', self.db_codebase)
+
+
+    def _detect_language(self, file_path: str) -> Optional[str]:
+        """Détecte le langage de programmation basé sur l'extension du fichier."""
+        extension_map = {
+            '.py': 'python',
+            '.js': 'javascript',
+            '.ts': 'typescript',
+            '.jsx': 'javascript', 
+            '.tsx': 'typescript', 
+            '.java': 'java',
+            '.c': 'c',
+            '.cpp': 'cpp',
+            '.h': 'c_header',
+            '.hpp': 'cpp_header',
+            '.go': 'go',
+            '.rb': 'ruby',
+            '.php': 'php',
+            '.html': 'html',
+            '.css': 'css',
+            '.json': 'json', 
+            '.xml': 'xml',   
+            '.yml': 'yaml', 
+            '.yaml': 'yaml',
+            '.sh': 'bash', 
+            '.md': 'markdown', 
+            '.less': 'css', 
+            '.svg': 'xml' 
+        }
+        _, ext = os.path.splitext(file_path)
+        return extension_map.get(ext.lower())
+
+    def _split_code_into_chunks(self, code_content: str, file_path: str, language: Optional[str]) -> List[Document]:
+        """Divise le code en chunks logiques (fonctions, classes, etc.) et extrait des métadonnées."""
+        chunks: List[Document] = []
+        lines = code_content.splitlines()
+        
+        project_name: Optional[str] = None
+        try:
+            relative_path = os.path.relpath(file_path, self.codebase_path)
+            path_parts = os.path.normpath(relative_path).split(os.sep) 
+            if len(path_parts) > 0 and not path_parts[0].startswith('.'): 
+                project_name = path_parts[0]
+        except ValueError:
+            pass 
+
+        file_imports_list: List[str] = [] 
+        file_imports_str: str = ""
+
+        # --- Langage spécifique: Python ---
+        if language == 'python':
+            func_class_pattern = re.compile(r"^(async\s+)?(def|class)\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*[:(]")
+            import_pattern = re.compile(r"^(?:from\s+([a-zA-Z_][a-zA-Z0-9_\.]*)\s+)?import\s+([a-zA-Z_][a-zA-Z0-9_\.,\s]*)(?:\s+as\s+.*)?")
+
+            for line in lines:
+                stripped_line = line.strip()
+                if not stripped_line or stripped_line.startswith('#'): 
+                    continue
+                import_match = import_pattern.match(stripped_line)
+                if import_match:
+                    if import_match.group(1): 
+                        file_imports_list.append(import_match.group(1).split('.')[0]) 
+                    else: 
+                        file_imports_list.extend([s.strip().split('.')[0] for s in import_match.group(2).split(',')])
+                elif not stripped_line.startswith(('from', 'import')): 
+                    break
+            file_imports_list = list(set(file_imports_list)) 
+            file_imports_str = ",".join(file_imports_list)
+
+            current_chunk_content: List[str] = []
+            current_chunk_metadata: Dict[str, Any] = {}
+            current_entity_start_line = 0
+
+            for i, line in enumerate(lines):
+                match = func_class_pattern.match(line)
+                if match and current_chunk_content:
+                    chunk_imports_to_store = current_chunk_metadata.get("imports_list", []) + file_imports_list
+                    chunk_imports_str_for_chunk = ",".join(list(set(chunk_imports_to_store))) 
+                    
+                    doc_to_add = Document(
+                        page_content="\n".join(current_chunk_content),
+                        metadata={
+                            "language": language,
+                            "file_type": "code", 
+                            "entity_type": current_chunk_metadata.get("entity_type", "module_top_level"),
+                            "entity_name": os.path.basename(file_path),
+                            "imports": chunk_imports_str_for_chunk, 
+                            "start_line": current_entity_start_line,
+                            "end_line": i,
+                            "project_name": project_name,
+                        }
+                    )
+                    self._add_hierarchical_metadata(doc_to_add, file_path, 'code')
+                    chunks.append(doc_to_add)
+                    current_chunk_content = []
+                    current_chunk_metadata = {}
+                
+                if match:
+                    entity_type = match.group(2) 
+                    entity_name = match.group(3)
+                    current_chunk_metadata = {
+                        "entity_type": "function" if entity_type == "def" else "class",
+                        "entity_name": entity_name,
+                        "start_line": i,
+                        "imports_list": [] 
+                    }
+                    current_entity_start_line = i
+                
+                current_chunk_content.append(line)
+
+            if current_chunk_content:
+                chunk_imports_to_store = current_chunk_metadata.get("imports_list", []) + file_imports_list
+                chunk_imports_str_for_chunk = ",".join(list(set(chunk_imports_to_store)))
+                
+                doc_to_add = Document(
+                    page_content="\n".join(current_chunk_content),
+                    metadata={
+                        "language": language,
+                        "file_type": "code", 
+                        "entity_type": current_chunk_metadata.get("entity_type", "module_remaining"),
+                        "entity_name": os.path.basename(file_path),
+                        "imports": chunk_imports_str_for_chunk, 
+                        "start_line": current_entity_start_line,
+                        "end_line": len(lines) - 1,
+                        "project_name": project_name,
+                    }
+                )
+                self._add_hierarchical_metadata(doc_to_add, file_path, 'code')
+                chunks.append(doc_to_add)
+
+        # --- Langage spécifique: JavaScript/TypeScript/JSX/TSX ---
+        elif language in ['javascript', 'typescript']:
+            js_ts_entity_pattern = re.compile(
+                r"^(?:export\s+)?(?:async\s+)?(?:function\s+([a-zA-Z_][a-zA-Z0-9_]*)|class\s+([a-zA-Z_][a-zA-Z0-9_]*)|(?:const|let|var)\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*(?:function|=>)|interface\s+([a-zA-Z_][a-zA-Z0-9_]*)|type\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*=)"
+            )
+            js_ts_import_pattern = re.compile(r"import\s+(?:\{[^}]+\}|\*\s+as\s+\w+|\w+)\s+from\s+['\"`]([^'\"]+)['\"`]")
+
+            for line in lines:
+                stripped_line = line.strip()
+                import_match = js_ts_import_pattern.search(stripped_line)
+                if import_match:
+                    module_path = import_match.group(1)
+                    file_imports_list.append(os.path.basename(module_path).split('.')[0]) 
+            file_imports_list = list(set(file_imports_list))
+            file_imports_str = ",".join(file_imports_list)
+
+            current_chunk_content = []
+            current_chunk_metadata = {}
+            current_entity_start_line = 0
+
+            for i, line in enumerate(lines):
+                match = js_ts_entity_pattern.match(line.strip())
+                if match and current_chunk_content: 
+                    entity_type = "module_top_level"
+                    entity_name = os.path.basename(file_path)
+                    
+                    if match.group(1): (entity_type, entity_name) = ("function", match.group(1))
+                    elif match.group(2): (entity_type, entity_name) = ("class", match.group(2))
+                    elif match.group(3): (entity_type, entity_name) = ("variable", match.group(3))
+                    elif match.group(4): (entity_type, entity_name) = ("interface", match.group(4))
+                    elif match.group(5): (entity_type, entity_name) = ("type", match.group(5))
+
+                    doc_to_add = Document(
+                        page_content="\n".join(current_chunk_content),
+                        metadata={
+                            "language": language,
+                            "file_type": "code",
+                            "entity_type": current_chunk_metadata.get("entity_type", "module_top_level_segment"),
+                            "entity_name": current_chunk_metadata.get("entity_name", os.path.basename(file_path)),
+                            "imports": file_imports_str, 
+                            "start_line": current_entity_start_line,
+                            "end_line": i,
+                            "project_name": project_name,
+                        }
+                    )
+                    self._add_hierarchical_metadata(doc_to_add, file_path, 'code')
+                    chunks.append(doc_to_add)
+                    current_chunk_content = []
+                    current_chunk_metadata = {
+                        "entity_type": entity_type,
+                        "entity_name": entity_name,
+                        "start_line": i
+                    }
+                    current_entity_start_line = i
+                
+                current_chunk_content.append(line)
+
+            if current_chunk_content: 
+                doc_to_add = Document(
+                    page_content="\n".join(current_chunk_content),
+                    metadata={
+                        "language": language,
+                        "file_type": "code",
+                        "entity_type": current_chunk_metadata.get("entity_type", "module_remaining_segment"),
+                        "entity_name": os.path.basename(file_path),
+                        "imports": file_imports_str,
+                        "start_line": current_entity_start_line,
+                        "end_line": len(lines) - 1,
+                        "project_name": project_name,
+                    }
+                )
+                self._add_hierarchical_metadata(doc_to_add, file_path, 'code')
+                chunks.append(doc_to_add)
+
+        # --- Langage spécifique: HTML ---
+        elif language == 'html':
+            html_tag_pattern = re.compile(r"^\s*<(?P<tag_name>[a-zA-Z0-9]+)(?:\s+[^>]*)?>")
+            
+            html_sources_list: List[str] = []
+            script_src_pattern = re.compile(r"<script[^>]*src=['\"]([^'\"]+)['\"][^>]*>")
+            link_href_pattern = re.compile(r"<link[^>]*href=['\"]([^'\"]+)['\"][^>]*>")
+            
+            for line in lines:
+                script_match = script_src_pattern.search(line)
+                if script_match:
+                    html_sources_list.append(script_match.group(1))
+                link_match = link_href_pattern.search(line)
+                if link_match:
+                    html_sources_list.append(link_match.group(1))
+            file_imports_str = ",".join(list(set(html_sources_list)))
+
+            current_chunk_content = []
+            current_tag = "document_root" 
+            current_entity_start_line = 0
+
+            for i, line in enumerate(lines):
+                match = html_tag_pattern.match(line)
+                if match:
+                    tag_name = match.group("tag_name")
+                    if tag_name in ['html', 'head', 'body', 'div', 'section', 'article', 'nav', 'header', 'footer', 'main'] and current_chunk_content:
+                        doc_to_add = Document(
+                            page_content="\n".join(current_chunk_content),
+                            metadata={
+                                "language": language,
+                                "file_type": "code",
+                                "entity_type": "html_tag_block",
+                                "entity_name": current_tag,
+                                "imports": file_imports_str,
+                                "start_line": current_entity_start_line,
+                                "end_line": i,
+                                "project_name": project_name,
+                            }
+                        )
+                        self._add_hierarchical_metadata(doc_to_add, file_path, 'code')
+                        chunks.append(doc_to_add)
+                        current_chunk_content = []
+                        current_entity_start_line = i
+                    current_tag = tag_name 
+                
+                current_chunk_content.append(line)
+            
+            if current_chunk_content: 
+                doc_to_add = Document(
+                    page_content="\n".join(current_chunk_content),
+                    metadata={
+                        "language": language,
+                        "file_type": "code",
+                        "entity_type": "html_tag_remaining",
+                        "entity_name": current_tag,
+                        "imports": file_imports_str,
+                        "start_line": current_entity_start_line,
+                        "end_line": len(lines) - 1,
+                        "project_name": project_name,
+                    }
+                )
+                self._add_hierarchical_metadata(doc_to_add, file_path, 'code')
+                chunks.append(doc_to_add)
+
+        # --- Langage spécifique: CSS / LESS ---
+        elif language == 'css':
+            css_rule_pattern = re.compile(r"^\s*([a-zA-Z0-9\s\.\#\:\,\-\>\[\]\(\)\"\'=\~]+)\s*\{") 
+            
+            css_imports_list: List[str] = []
+            at_import_pattern = re.compile(r"@import\s+['\"]([^'\"]+)['\"];")
+            for line in lines:
+                import_match = at_import_pattern.search(line)
+                if import_match:
+                    css_imports_list.append(import_match.group(1))
+            file_imports_str = ",".join(list(set(css_imports_list)))
+
+            current_chunk_content = []
+            current_selector = "document_styles"
+            current_rule_start_line = 0
+
+            for i, line in enumerate(lines):
+                match = css_rule_pattern.match(line)
+                if match:
+                    selector = match.group(1).strip()
+                    if current_chunk_content:
+                        doc_to_add = Document(
+                            page_content="\n".join(current_chunk_content),
+                            metadata={
+                                "language": language,
+                                "file_type": "code",
+                                "entity_type": "css_rule_block",
+                                "entity_name": current_selector,
+                                "imports": file_imports_str,
+                                "start_line": current_rule_start_line,
+                                "end_line": i,
+                                "project_name": project_name,
+                            }
+                        )
+                        self._add_hierarchical_metadata(doc_to_add, file_path, 'code')
+                        chunks.append(doc_to_add)
+                        current_chunk_content = []
+                        current_rule_start_line = i
+                    current_selector = selector
+                
+                current_chunk_content.append(line)
+            
+            if current_chunk_content: 
+                doc_to_add = Document(
+                    page_content="\n".join(current_chunk_content),
+                    metadata={
+                        "language": language,
+                        "file_type": "code",
+                        "entity_type": "css_rule_remaining",
+                        "entity_name": current_selector,
+                        "imports": file_imports_str,
+                        "start_line": current_rule_start_line,
+                        "end_line": len(lines) - 1,
+                        "project_name": project_name,
+                    }
+                )
+                self._add_hierarchical_metadata(doc_to_add, file_path, 'code')
+                chunks.append(doc_to_add)
+        
+        # --- Langage spécifique: YAML ---
+        elif language == 'yaml':
+            yaml_top_level_key_pattern = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_-]*:\s*.*")
+            
+            current_chunk_content = []
+            current_key = "document_root" 
+            current_block_start_line = 0
+
+            for i, line in enumerate(lines):
+                match = yaml_top_level_key_pattern.match(line)
+                if match and not line.startswith(" ") and current_chunk_content: 
+                    key_name = line.split(':')[0].strip()
+                    doc_to_add = Document(
+                        page_content="\n".join(current_chunk_content),
+                        metadata={
+                            "language": language,
+                            "file_type": "code",
+                            "entity_type": "yaml_block",
+                            "entity_name": current_key,
+                            "imports": "", 
+                            "start_line": current_block_start_line,
+                            "end_line": i,
+                            "project_name": project_name,
+                        }
+                    )
+                    self._add_hierarchical_metadata(doc_to_add, file_path, 'code')
+                    chunks.append(doc_to_add)
+                    current_chunk_content = []
+                    current_block_start_line = i
+                    current_key = key_name
+                
+                current_chunk_content.append(line)
+            
+            if current_chunk_content: 
+                doc_to_add = Document(
+                    page_content="\n".join(current_chunk_content),
+                    metadata={
+                        "language": language,
+                        "file_type": "code",
+                        "entity_type": "yaml_block_remaining", 
+                        "entity_name": current_key,
+                        "imports": "",
+                        "start_line": current_block_start_line,
+                        "end_line": len(lines) - 1,
+                        "project_name": project_name,
+                    }
+                )
+                self._add_hierarchical_metadata(doc_to_add, file_path, 'code')
+                chunks.append(doc_to_add)
+
+        # --- Langage spécifique: Markdown ---
+        elif language == 'markdown':
+            markdown_heading_pattern = re.compile(r"^(#+)\s*(.*)")
+            
+            current_chunk_content = []
+            current_heading = "document_top" 
+            current_section_start_line = 0
+
+            for i, line in enumerate(lines):
+                match = markdown_heading_pattern.match(line)
+                if match and current_chunk_content:
+                    heading_level = len(match.group(1))
+                    heading_text = match.group(2).strip()
+                    doc_to_add = Document(
+                        page_content="\n".join(current_chunk_content),
+                        metadata={
+                            "language": language,
+                            "file_type": "code", 
+                            "entity_type": f"markdown_heading_level_{heading_level}",
+                            "entity_name": current_heading, 
+                            "imports": "", 
+                            "start_line": current_section_start_line,
+                            "end_line": i,
+                            "project_name": project_name,
+                        }
+                    )
+                    self._add_hierarchical_metadata(doc_to_add, file_path, 'code')
+                    chunks.append(doc_to_add)
+                    current_chunk_content = []
+                    current_section_start_line = i
+                    current_heading = heading_text 
+                
+                current_chunk_content.append(line)
+            
+            if current_chunk_content: 
+                doc_to_add = Document(
+                    page_content="\n".join(current_chunk_content),
+                    metadata={
+                        "language": language,
+                        "file_type": "code",
+                        "entity_type": f"markdown_section_remaining", 
+                        "entity_name": current_heading,
+                        "imports": "",
+                        "start_line": current_section_start_line,
+                        "end_line": len(lines) - 1,
+                        "project_name": project_name,
+                    }
+                )
+                self._add_hierarchical_metadata(doc_to_add, file_path, 'code')
+                chunks.append(doc_to_add)
+
+        # --- Fallback pour les langues non implémentées spécifiquement ---
+        else:
+            print(f"Warning: Advanced code splitting not implemented for {language}. Falling back to general text chunks.")
+            text_splitter = RecursiveCharacterTextSplitter(
+                chunk_size=Config.CHUNK_SIZE, 
+                chunk_overlap=Config.CHUNK_OVERLAP,
+                length_function=len,
+                add_start_index=True,
+            )
+            base_doc = Document(page_content=code_content, metadata={
+                "language": language,
+                "file_type": "code", 
+                "entity_type": "module_generic_chunk", 
+                "entity_name": os.path.basename(file_path),
+                "imports": "", 
+                "start_line": 0,
+                "end_line": len(lines) - 1,
+                "project_name": project_name,
+            })
+            chunks_from_splitter = text_splitter.split_documents([base_doc])
+            for chunk in chunks_from_splitter:
+                chunk.metadata['source'] = os.path.abspath(file_path)
+                self._add_hierarchical_metadata(chunk, file_path, 'code')
+                chunks.append(chunk)
+
+        return chunks
+
+    def update_vector_store(self):
+        """Met à jour le vector store en traitant les nouveaux/modifiés/supprimés documents.
+        Cette méthode doit être appelée dans un app_context Flask pour les opérations DB.
+        """
+        print("Starting RAG service update...")
+        try:
+            self._process_kb_documents()
+            self._process_codebase_documents()
+            db.session.commit() # Commit all changes at the end of the update
+            print("DEBUG DB: All DocumentStatus changes committed.")
+        except Exception as e:
+            print(f"FATAL ERROR during RAG service update: {e}")
+            traceback.print_exc()
+            db.session.rollback() # Rollback if a fatal error occurred
+            print("DEBUG DB: DocumentStatus changes rolled back due to error.")
+        print("RAG service update complete.")
+
+    def _add_hierarchical_metadata(self, doc: Document, file_path: str, file_type: str): 
+        """Ajoute les métadonnées de dossier et de nom de fichier/titre au chunk."""
+        base_dir = self.kb_documents_path if file_type == 'kb' else self.codebase_path
+        
+        absolute_file_path = os.path.abspath(file_path)
+        doc.metadata['source'] = os.path.normpath(absolute_file_path) 
+
+        doc.metadata['document_path_relative'] = os.path.normpath(os.path.relpath(absolute_file_path, base_dir))
+
+        path_components = os.path.normpath(os.path.relpath(absolute_file_path, base_dir)).split(os.sep)
+
+        MAX_FOLDER_LEVELS = 3 
+
+        for i, component in enumerate(path_components[:-1]): 
+            if i < MAX_FOLDER_LEVELS:
+                doc.metadata[f'folder_level_{i+1}'] = component
+            if i == len(path_components) - 2: 
+                doc.metadata['last_folder_name'] = component
+
+        doc.metadata['file_name'] = os.path.basename(file_path) 
+        doc.metadata['file_type'] = file_type 
+        
+        if file_type == 'code' and len(path_components) > 0 and path_components[0] and not path_components[0].startswith('.'): 
+            doc.metadata['project_name'] = path_components[0]
+        else: 
+            doc.metadata['project_name'] = None
+
+
+        if 'title' not in doc.metadata or not doc.metadata['title']: 
+            doc.metadata['document_title'] = os.path.splitext(os.path.basename(file_path))[0]
+        else:
+            doc.metadata['document_title'] = doc.metadata['title'] 
+
+    def as_retriever_kb(self):
+        """Retourne le retriever pour la base de connaissances."""
+        return self.db_kb.as_retriever(search_kwargs={"k": Config.TOP_K_RETRIEVAL_KB, "filter": {"file_type": "kb"}})
+
+    def as_retriever_codebase(self):
+        """Retourne le retriever pour la codebase."""
+        return self.db_codebase.as_retriever(search_kwargs={"k": Config.TOP_K_RETRIEVAL_CODEBASE, "filter": {"file_type": "code"}})
+
+
+# This block is for direct testing of RAGService outside Flask app.
+# It requires a minimal Flask app context setup for SQLAlchemy.
+if __name__ == "__main__":
+    from flask import Flask
+    os.environ['DB_USER'] = os.environ.get('DB_USER', 'dev_user')
+    os.environ['DB_PASSWORD'] = os.environ.get('DB_PASSWORD', 'dev_password')
+    os.environ['DB_HOST'] = os.environ.get('DB_HOST', 'localhost')
+    os.environ['DB_PORT'] = os.environ.get('DB_PORT', '5432')
+    os.environ['DB_NAME'] = os.environ.get('DB_NAME', 'mon_premier_rag_db')
+    os.environ['LMSTUDIO_API_KEY'] = os.environ.get('LMSTUDIO_API_KEY', 'lm-studio') 
+    os.environ['LMSTUDIO_CHAT_MODEL'] = os.environ.get('LMSTUDIO_CHAT_MODEL', 'Llama-3.1-8B-UltraLong-4M-Instruct-Q4_K_M')
+
+    temp_app = Flask(__name__)
+    temp_app.config.from_object(Config)
+    db.init_app(temp_app)
+
+    with temp_app.app_context():
+        db.create_all()
+
+    print("Initializing RAGService for direct testing...")
+    rag_service = RAGService()
+    print("Updating vector stores...")
     
-    relative_path = os.path.relpath(file_path, base_dir)
-    path_components = relative_path.split(os.sep) 
+    with temp_app.app_context():
+        try:
+            rag_service.update_vector_store()
+            db.session.commit() 
+        except Exception as e:
+            print(f"Error during RAG service update in test run: {e}")
+            db.session.rollback() 
+            traceback.print_exc()
 
-    MAX_FOLDER_LEVELS = 3 
 
-    for i, component in enumerate(path_components[:-1]): 
-        if i < MAX_FOLDER_LEVELS:
-            doc.metadata[f'folder_level_{i+1}'] = component
-        if i == len(path_components) - 2: 
-            doc.metadata['last_folder_name'] = component
+    with temp_app.app_context():
+        print("\nKB DocumentStatus in DB:")
+        kb_statuses = DocumentStatus.query.filter_by(file_type='kb').all()
+        if kb_statuses:
+            for status_entry in kb_statuses:
+                print(f"- {status_entry.file_path} | Status: {status_entry.status} | Last Ingested: {status_entry.indexed_at} | Error: {status_entry.error_message}")
+        else:
+            print("No KB DocumentStatus entries found.")
 
-    doc.metadata['file_name'] = os.path.basename(file_path) 
-    doc.metadata['document_path_relative'] = relative_path 
-    doc.metadata['file_type'] = file_type 
-    
-    if file_type == 'code' and len(path_components) > 0: 
-        doc.metadata['project_name'] = path_components[0]
-        current_app.logger.info(f"Ajout du metadata 'project_name': {path_components[0]} pour {file_path}")
-
-    if 'title' not in doc.metadata or not doc.metadata['title']: 
-        doc.metadata['document_title'] = os.path.splitext(os.path.basename(file_path))[0]
-    else:
-        doc.metadata['document_title'] = doc.metadata['title'] 
-
-# --- Fonctions pour accéder aux instances du Vector Store et du Retriever après leur initialisation ---
-def get_vectorstore() -> Chroma: 
-    if _vectorstore is None:
-        raise RuntimeError("Vector Store n'a pas été initialisé. Appelez initialize_vectorstore() au démarrage de l'application.")
-    return _vectorstore
-
-def get_retriever() -> Any: 
-    if _retriever is None:
-        raise RuntimeError("Retriever n'a pas été initialisé. Appelez initialize_vectorstore() au démarrage de l'application.")
-    return _retriever
+        print("\nCodebase DocumentStatus in DB:")
+        code_statuses = DocumentStatus.query.filter_by(file_type='code').all()
+        if code_statuses:
+            for status_entry in code_statuses:
+                print(f"- {status_entry.file_path} | Status: {status_entry.status} | Last Ingested: {status_entry.indexed_at} | Error: {status_entry.error_message}")
+        else:
+            print("No Codebase DocumentStatus entries found.")

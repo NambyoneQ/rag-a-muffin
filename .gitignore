@@ -31,3 +31,4 @@ inspect_chunks.py
 debug_chroma_paths.py
 test_excel.py
 test_ods.py
+.rag_cache/

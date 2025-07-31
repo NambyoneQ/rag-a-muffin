@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Optional # NEW: Import Optional
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 from app import db 
 from app.models import Message, Conversation 
@@ -16,7 +16,14 @@ def load_conversation_history(conversation_id: int) -> List[BaseMessage]:
     return chat_history
 
 # Fonction pour sauvegarder un message (utilisateur ou bot) dans la conversation active de la base de données
-def save_message(conversation_id: int, sender: str, content: str): # type: ignore [reportCallIssue]
-    new_message = Message(conversation_id=conversation_id, sender=sender, content=content) # type: ignore [reportCallIssue]
+# NEW: Ajout de is_rag_response et source_documents
+def save_message(conversation_id: int, sender: str, content: str, is_rag_response: bool = False, source_documents: Optional[str] = None): 
+    new_message = Message(
+        conversation_id=conversation_id, 
+        sender=sender, 
+        content=content,
+        is_rag_response=is_rag_response, # NEW
+        source_documents=source_documents # NEW
+    ) 
     db.session.add(new_message)
     db.session.commit()

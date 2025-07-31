@@ -1,3 +1,4 @@
+# config.py
 import os
 
 class Config:
@@ -30,3 +31,19 @@ class Config:
     KNOWLEDGE_BASE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'kb_documents')
     CODE_BASE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'codebase')
     CHROMA_PERSIST_DIRECTORY = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'chroma_db')
+
+    # NOUVELLES CONFIGURATIONS POUR RAG SERVICE (pour éviter les erreurs Pylance)
+    # Chemins spécifiques pour les bases de données Chroma (à l'intérieur du dossier persist_directory)
+    CHROMA_PATH_KB = os.path.join(CHROMA_PERSIST_DIRECTORY, 'kb')
+    CHROMA_PATH_CODEBASE = os.path.join(CHROMA_PERSIST_DIRECTORY, 'codebase')
+    
+    # Chemin pour le cache de traitement (pour stocker les hash des fichiers)
+    PROCESSING_CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.rag_cache') 
+
+    # Paramètres de chunking par défaut
+    CHUNK_SIZE = 1000
+    CHUNK_OVERLAP = 200
+
+    # Paramètres de récupération (nombre de documents à récupérer)
+    TOP_K_RETRIEVAL_KB = 5
+    TOP_K_RETRIEVAL_CODEBASE = 7 # Un peu plus élevé pour le code pourrait être utile

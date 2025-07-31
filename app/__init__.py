@@ -28,9 +28,9 @@ if not app.logger.handlers:
 # Dictionnaire pour stocker les instances des services initialisés, accessibles globalement via app.extensions
 app.extensions = {
     "llm_service": None,
-    "rag_service": None,
+    "rag_service": None, # Va stocker l'instance de RAGService avec ses retrievers
     "conversation_service": None,
-    "available_folder_names": [] # NOUVEAU : Pour stocker les noms de dossiers disponibles pour le RAG
+    "available_folder_names": [] # Pour stocker les noms de dossiers disponibles pour le RAG
 }
 
 # Fonction pour initialiser tous les services de l'application au démarrage
@@ -46,17 +46,19 @@ def initialize_services_on_startup():
         print(f"PRINT ERROR: Erreur lors de la création des tables de la base de données: {e}")
         print("Vérifiez que le serveur PostgreSQL est en cours d'exécution et que l'utilisateur 'dev_user' a les droits 'Create databases' sur la base de données 'mon_premier_rag_db'.")
 
-    # NOUVEAU : Scan des dossiers de base de connaissances et de code pour le filtrage dynamique
+    # Scan des dossiers de base de connaissances et de code pour le filtrage dynamique
     available_folder_names = set()
     kb_dir = app.config['KNOWLEDGE_BASE_DIR']
     code_dir = app.config['CODE_BASE_DIR']
 
     if os.path.exists(kb_dir):
+        # Pour KB, lister directement les dossiers de premier niveau
         for item in os.listdir(kb_dir):
             if os.path.isdir(os.path.join(kb_dir, item)):
                 available_folder_names.add(item)
     
     if os.path.exists(code_dir):
+        # Pour Codebase, lister directement les dossiers de premier niveau (qui sont traités comme des projets)
         for item in os.listdir(code_dir):
             if os.path.isdir(os.path.join(code_dir, item)):
                 available_folder_names.add(item) 
@@ -73,27 +75,35 @@ def initialize_services_on_startup():
     }
     app.logger.info("LLMs principal et d'embeddings initialisés et attachés à l'application.")
 
-    # 3. Initialiser le RAG Service
-    from app.services import rag_service as _rag_service_module
+    # 3. Initialiser le RAG Service (CORRECTION ICI)
+    from app.services.rag_service import RAGService # Importe directement la classe RAGService
     try:
+        # Créer l'instance du RAGService. Son __init__ va charger/créer les ChromaDBs
+        rag_service_instance = RAGService()
+        
+        # Lancer la mise à jour des vector stores. Cette méthode gérera l'ingestion, la mise à jour et la suppression.
+        # Elle est appelée DANS un app_context car elle interagit avec db.session pour DocumentStatus.
         with app.app_context(): 
-            _rag_service_module.initialize_vectorstore(app) 
+            rag_service_instance.update_vector_store()
+
+        # Stocker les retrievers pour l'utilisation dans les routes de chat
         app.extensions["rag_service"] = {
-            "vectorstore": _rag_service_module.get_vectorstore(),
-            "retriever": _rag_service_module.get_retriever()
+            "kb_retriever": rag_service_instance.as_retriever_kb(), # Retriever spécifique pour la KB
+            "codebase_retriever": rag_service_instance.as_retriever_codebase() # Retriever spécifique pour la Codebase
         }
-        app.logger.info("Vector Store (RAG) initialisé et attaché à l'application.")
+        app.logger.info("RAG Service (ChromaDB) initialisé et attaché à l'application avec des retrievers spécifiques.")
     except RuntimeError as e:
         app.logger.warning(f"Impossible d'initialiser le RAG service : {e}. Le RAG sera désactivé.")
         app.extensions["rag_service"] = {
-            "vectorstore": None,
-            "retriever": None
+            "kb_retriever": None,
+            "codebase_retriever": None
         }
     except Exception as e:
         app.logger.error(f"Erreur inattendue lors de l'initialisation du RAG service : {e}. Le RAG sera désactivé.")
+        print(f"PRINT ERROR: Erreur inattendue lors de l'initialisation du RAG service : {e}")
         app.extensions["rag_service"] = {
-            "vectorstore": None,
-            "retriever": None
+            "kb_retriever": None,
+            "codebase_retriever": None
         }
 
     # 4. Initialiser le Conversation Service
