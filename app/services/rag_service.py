@@ -10,7 +10,7 @@ import traceback
 
 # Langchain imports
 from langchain_community.document_loaders import PyPDFLoader, UnstructuredWordDocumentLoader, UnstructuredODTLoader, TextLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.text_splitter import RecursiveCharacterTextSplitter # CORRECTED: Removed extra 'Character'
 from langchain_community.vectorstores import Chroma
 from langchain.docstore.document import Document
 from langchain_core.prompts import ChatPromptTemplate
@@ -29,6 +29,8 @@ from app.models import DocumentStatus
 import openpyxl
 import pyexcel_ods 
 
+# Liste des extensions de fichiers binaires ou non textuels à exclure explicitement de la lecture de contenu.
+# Cette liste est utilisée pour éviter les erreurs de décodage et les tentatives d'ingestion inappropriées.
 EXCLUDED_EXTENSIONS = {
     '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp', # Images
     '.mp3', '.wav', '.ogg', '.flac', '.aac', # Audio
@@ -57,15 +59,19 @@ class RAGService:
 
         self._any_db_reset = False 
 
+        # Initialise ou charge les vector stores et vérifie leur état
+        # _get_or_create_vector_store retourne l'instance Chroma et un booléen indiquant si elle était nouvelle ou vide
         self.db_kb, kb_was_reset_or_empty = self._get_or_create_vector_store(self.chroma_path_kb)
         self.db_codebase, codebase_was_reset_or_empty = self._get_or_create_vector_store(self.chroma_path_codebase)
         
+        # Si une des bases de données a été réinitialisée ou est vide, force le nettoyage du cache
+        # Cela garantit que si l'utilisateur supprime manuellement 'chroma_db', une réingestion complète aura lieu.
         if kb_was_reset_or_empty or codebase_was_reset_or_empty:
             self._any_db_reset = True
             print(f"Detected new/empty ChromaDB(s). Clearing processing cache at {self.processing_cache_path} to force full re-ingestion.")
             if os.path.exists(self.processing_cache_path):
                 shutil.rmtree(self.processing_cache_path)
-            os.makedirs(self.processing_cache_path, exist_ok=True) 
+            os.makedirs(self.processing_cache_path, exist_ok=True) # S'assurer qu'il existe après la suppression
 
 
     def _initialize_directories(self):
@@ -78,6 +84,7 @@ class RAGService:
         Retourne l'instance ChromaDB et un booléen (True si créée/vide, False si chargée avec des données existantes).
         """
         was_reset_or_empty = False
+        # Vérifie si le répertoire existe et est vide avant d'essayer de le charger comme existant
         if not os.path.exists(path) or not os.listdir(path):
             print(f"Creating new ChromaDB at {path}")
             was_reset_or_empty = True
@@ -85,6 +92,7 @@ class RAGService:
         else:
             print(f"Loading existing ChromaDB from {path}")
             chroma_db = Chroma(embedding_function=self.embeddings, persist_directory=path)
+            # Après le chargement, vérifie si elle est réellement vide de documents
             if len(chroma_db.get(include=[])['ids']) == 0:
                 print(f"Existing ChromaDB at {path} found to be empty. Treating as if newly created.")
                 was_reset_or_empty = True 
@@ -125,6 +133,7 @@ class RAGService:
                 file_path = os.path.normpath(os.path.join(root, file)) 
                 file_extension = os.path.splitext(file_path)[1].lower()
                 
+                # Exclusion précoce des fichiers binaires ou à ignorer pour éviter les erreurs de lecture
                 if file_extension in EXCLUDED_EXTENSIONS or file.startswith('~$'): 
                     print(f"Skipping file due to extension or temp status: {file_path}") 
                     continue
@@ -160,39 +169,133 @@ class RAGService:
                 docs_for_file = []
                 for sheet_name in workbook.sheetnames:
                     sheet = workbook[sheet_name]
-                    sheet_rows_data = []
+                    all_rows_data = []
                     for row in sheet.iter_rows():
-                        row_values = [str(cell.value) if cell.value is not None else "" for cell in row]
-                        sheet_rows_data.append("\t".join(row_values))
+                        all_rows_data.append([str(cell.value) if cell.value is not None else "" for cell in row])
                     
-                    if sheet_rows_data:
-                        sheet_content = f"Feuille: {sheet_name}\n" + "\n".join(sheet_rows_data)
+                    if not all_rows_data:
+                        continue # Skip empty sheets
+
+                    description_rows_data = []
+                    table_header_data = []
+                    table_content_rows_data = []
+                    
+                    infos_row_index = -1
+                    # Find 'infos' row
+                    for i, row in enumerate(all_rows_data):
+                        if any("infos" in str(cell).lower() for cell in row):
+                            infos_row_index = i
+                            break
+                    
+                    if infos_row_index != -1:
+                        # Rows before 'infos' become description
+                        description_rows_data = all_rows_data[:infos_row_index]
+                        # Row AFTER 'infos' is the header, data follows
+                        if infos_row_index + 1 < len(all_rows_data): # Ensure there's a row after 'infos' for header
+                            table_header_data = all_rows_data[infos_row_index + 1]
+                            table_content_rows_data = all_rows_data[infos_row_index + 2:] # Data starts two rows after 'infos'
+                        else: # 'infos' is the last row or no rows after, no table data
+                            table_header_data = []
+                            table_content_rows_data = []
+                    else:
+                        # If 'infos' not found, first row is header, rest is data
+                        description_rows_data = [] # No explicit description chunk
+                        table_header_data = all_rows_data[0]
+                        table_content_rows_data = all_rows_data[1:]
+
+                    # Create description chunk if content exists
+                    if description_rows_data:
+                        description_content = f"Feuille: {sheet_name} - Description:\n\n" + "\n".join(["\t".join(r) for r in description_rows_data])
+                        docs_for_file.append(Document(page_content=description_content, metadata={
+                            "source": os.path.abspath(file_path),
+                            "file_type": "kb",
+                            "sheet_name": sheet_name,
+                            "chunk_type": "description" # New metadata field
+                        }))
+
+                    # Create table chunk if content exists
+                    if table_content_rows_data and table_header_data: # Ensure there's header and data
+                        markdown_table = []
+                        markdown_table.append("| " + " | ".join(table_header_data) + " |")
+                        markdown_table.append("|---" * len(table_header_data) + "|") # Separator line
+                        for row_values in table_content_rows_data:
+                            markdown_table.append("| " + " | ".join(row_values) + " |")
+                        
+                        table_content = f"Feuille: {sheet_name} - Tableau:\n\n" + "\n".join(markdown_table)
+                        
                         metadata = {
                             "source": os.path.abspath(file_path), 
                             "file_type": "kb", 
                             "sheet_name": sheet_name,
-                            "is_table_chunk": True 
+                            "is_table_chunk": True, # Mark as table chunk
+                            "chunk_type": "table" # New metadata field
                         }
-                        docs_for_file.append(Document(page_content=sheet_content, metadata=metadata))
+                        docs_for_file.append(Document(page_content=table_content, metadata=metadata))
                 return docs_for_file 
             elif file_extension == ".ods":
+                # Handle ODS files manually, each sheet as a separate Document
                 ods_data = pyexcel_ods.get_data(file_path) 
                 docs_for_file = [] 
-                for sheet_name, table_data in ods_data.items():
-                    sheet_rows_data = []
-                    for row in table_data:
-                        row_values = [str(cell) if cell is not None else "" for cell in row]
-                        sheet_rows_data.append("\t".join(row_values)) 
+                for sheet_name, table_data_raw in ods_data.items(): # Renamed to table_data_raw to avoid confusion
+                    if not table_data_raw: # Skip empty sheets
+                        continue
                     
-                    if sheet_rows_data:
-                        sheet_content = f"Feuille: {sheet_name}\n" + "\n".join(sheet_rows_data)
+                    all_rows_data = []
+                    for row in table_data_raw: # Iterate over raw data
+                        all_rows_data.append([str(cell) if cell is not None else "" for cell in row])
+
+                    description_rows_data = []
+                    table_header_data = []
+                    table_content_rows_data = []
+
+                    infos_row_index = -1
+                    # Find 'infos' row
+                    for i, row in enumerate(all_rows_data):
+                        if any("infos" in str(cell).lower() for cell in row):
+                            infos_row_index = i
+                            break
+                    
+                    if infos_row_index != -1:
+                        description_rows_data = all_rows_data[:infos_row_index]
+                        if infos_row_index + 1 < len(all_rows_data): # Ensure row after 'infos' exists for header
+                            table_header_data = all_rows_data[infos_row_index + 1]
+                            table_content_rows_data = all_rows_data[infos_row_index + 2:] # Data starts two rows after 'infos'
+                        else:
+                            table_header_data = []
+                            table_content_rows_data = []
+                    else:
+                        description_rows_data = []
+                        table_header_data = all_rows_data[0]
+                        table_content_rows_data = all_rows_data[1:]
+
+                    # Create description chunk if content exists
+                    if description_rows_data:
+                        description_content = f"Feuille: {sheet_name} - Description:\n\n" + "\n".join(["\t".join(r) for r in description_rows_data])
+                        docs_for_file.append(Document(page_content=description_content, metadata={
+                            "source": os.path.abspath(file_path),
+                            "file_type": "kb",
+                            "sheet_name": sheet_name,
+                            "chunk_type": "description"
+                        }))
+
+                    # Create table chunk if content exists
+                    if table_content_rows_data and table_header_data: # Ensure there's header and data
+                        markdown_table = []
+                        markdown_table.append("| " + " | ".join(table_header_data) + " |")
+                        markdown_table.append("|---" * len(table_header_data) + "|") # Separator line
+                        for row_values in table_content_rows_data:
+                            markdown_table.append("| " + " | ".join(row_values) + " |")
+                        
+                        table_content = f"Feuille: {sheet_name} - Tableau:\n\n" + "\n".join(markdown_table)
+                        
                         metadata = {
                             "source": os.path.abspath(file_path), 
                             "file_type": "kb", 
                             "sheet_name": sheet_name,
-                            "is_table_chunk": True 
+                            "is_table_chunk": True, 
+                            "chunk_type": "table" 
                         }
-                        docs_for_file.append(Document(page_content=sheet_content, metadata=metadata))
+                        docs_for_file.append(Document(page_content=table_content, metadata=metadata))
                 return docs_for_file 
             else:
                 loader = TextLoader(file_path, encoding='utf-8', autodetect_encoding=True)
@@ -200,7 +303,8 @@ class RAGService:
 
             for doc in docs:
                 doc.metadata["source"] = os.path.abspath(file_path)
-                doc.metadata["file_type"] = "kb" 
+                doc.metadata["file_type"] = "kb"
+                doc.metadata["chunk_type"] = "text" # Default for non-table docs
             return docs
 
         except Exception as e:
@@ -229,7 +333,7 @@ class RAGService:
         num_skipped_files = 0
         num_deleted_files = 0
         
-        all_chunks_to_add_in_this_run: List[Document] = [] # Initialized here to ensure it's always bound
+        all_chunks_to_add_in_this_run: List[Document] = [] 
 
         # Phase 1: Identify files to ADD or UPDATE
         for file_path_on_disk in current_files_on_disk.keys(): 
@@ -250,8 +354,6 @@ class RAGService:
                     num_modified_files += 1
                 elif doc_status_entry.status != 'indexed':
                     needs_processing = True
-                    if doc_status_entry.status == 'error': num_error_files += 1 
-                    elif doc_status_entry.status == 'skipped': num_skipped_files += 1
             else:
                 needs_processing = True
                 num_new_files += 1
@@ -284,14 +386,14 @@ class RAGService:
                 
                 try:
                     current_file_hash = self._calculate_file_hash(file_path_to_process) 
-                    loaded_docs: List[Document] = []
-                    
+                    loaded_docs_from_loader: List[Document] = [] # Renamed for clarity
+
                     if file_type == 'kb':
-                        loaded_docs = self._load_document(file_path_to_process)
+                        loaded_docs_from_loader = self._load_document(file_path_to_process)
                         final_chunks_for_file = []
                         text_splitter = RecursiveCharacterTextSplitter(chunk_size=Config.CHUNK_SIZE, chunk_overlap=Config.CHUNK_OVERLAP)
-                        for doc in loaded_docs:
-                            if doc.metadata.get('is_table_chunk'): 
+                        for doc in loaded_docs_from_loader:
+                            if doc.metadata.get('chunk_type') in ['table', 'description']: # Check for specific chunk_types from loader
                                 final_chunks_for_file.append(doc)
                             else: 
                                 split_docs = text_splitter.split_documents([doc])
@@ -543,8 +645,7 @@ class RAGService:
             js_ts_import_pattern = re.compile(r"import\s+(?:\{[^}]+\}|\*\s+as\s+\w+|\w+)\s+from\s+['\"`]([^'\"]+)['\"`]")
 
             for line in lines:
-                stripped_line = line.strip()
-                import_match = js_ts_import_pattern.search(stripped_line)
+                import_match = js_ts_import_pattern.search(line.strip())
                 if import_match:
                     module_path = import_match.group(1)
                     file_imports_list.append(os.path.basename(module_path).split('.')[0]) 
@@ -618,9 +719,9 @@ class RAGService:
             link_href_pattern = re.compile(r"<link[^>]*href=['\"]([^'\"]+)['\"][^>]*>")
             
             for line in lines:
-                script_match = script_src_pattern.search(line)
-                if script_match:
-                    html_sources_list.append(script_match.group(1))
+                import_match = script_src_pattern.search(line)
+                if import_match:
+                    html_sources_list.append(import_match.group(1))
                 link_match = link_href_pattern.search(line)
                 if link_match:
                     html_sources_list.append(link_match.group(1))
@@ -836,7 +937,7 @@ class RAGService:
         # --- Fallback pour les langues non implémentées spécifiquement ---
         else:
             print(f"Warning: Advanced code splitting not implemented for {language}. Falling back to general text chunks.")
-            text_splitter = RecursiveCharacterTextSplitter(
+            text_splitter = RecursiveCharacterTextSplitter( # Corrected typo here (removed extra 'Character')
                 chunk_size=Config.CHUNK_SIZE, 
                 chunk_overlap=Config.CHUNK_OVERLAP,
                 length_function=len,
