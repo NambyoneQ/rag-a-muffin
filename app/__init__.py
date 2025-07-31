@@ -52,13 +52,11 @@ def initialize_services_on_startup():
     code_dir = app.config['CODE_BASE_DIR']
 
     if os.path.exists(kb_dir):
-        # Pour KB, lister directement les dossiers de premier niveau
         for item in os.listdir(kb_dir):
             if os.path.isdir(os.path.join(kb_dir, item)):
                 available_folder_names.add(item)
     
     if os.path.exists(code_dir):
-        # Pour Codebase, lister directement les dossiers de premier niveau (qui sont traités comme des projets)
         for item in os.listdir(code_dir):
             if os.path.isdir(os.path.join(code_dir, item)):
                 available_folder_names.add(item) 
@@ -86,24 +84,25 @@ def initialize_services_on_startup():
         with app.app_context(): 
             rag_service_instance.update_vector_store()
 
-        # Stocker les retrievers pour l'utilisation dans les routes de chat
+        # Stocker les instances ChromaDB brutes, pas les retrievers pré-configurés
+        # Le retriever sera créé dynamiquement dans chat_routes.py
         app.extensions["rag_service"] = {
-            "kb_retriever": rag_service_instance.as_retriever_kb(), # Retriever spécifique pour la KB
-            "codebase_retriever": rag_service_instance.as_retriever_codebase() # Retriever spécifique pour la Codebase
+            "kb_db_instance": rag_service_instance.get_kb_db_instance(), 
+            "codebase_db_instance": rag_service_instance.get_codebase_db_instance()
         }
-        app.logger.info("RAG Service (ChromaDB) initialisé et attaché à l'application avec des retrievers spécifiques.")
+        app.logger.info("RAG Service (ChromaDB) initialisé et attaché à l'application avec des instances DB.")
     except RuntimeError as e:
         app.logger.warning(f"Impossible d'initialiser le RAG service : {e}. Le RAG sera désactivé.")
         app.extensions["rag_service"] = {
-            "kb_retriever": None,
-            "codebase_retriever": None
+            "kb_db_instance": None,
+            "codebase_db_instance": None
         }
     except Exception as e:
         app.logger.error(f"Erreur inattendue lors de l'initialisation du RAG service : {e}. Le RAG sera désactivé.")
         print(f"PRINT ERROR: Erreur inattendue lors de l'initialisation du RAG service : {e}")
         app.extensions["rag_service"] = {
-            "kb_retriever": None,
-            "codebase_retriever": None
+            "kb_db_instance": None,
+            "codebase_db_instance": None
         }
 
     # 4. Initialiser le Conversation Service

@@ -8,6 +8,7 @@ import json
 from flask import render_template, request, jsonify, Blueprint, current_app
 
 from typing import List, Dict, Any, Optional
+# from copy import deepcopy # No longer needed as we create new retriever instances
 
 from app.services.conversation_service import load_conversation_history, save_message
 from langchain_openai import ChatOpenAI
@@ -18,6 +19,7 @@ from langchain.chains.retrieval import create_retrieval_chain
 from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain_core.documents import Document
 from langchain_core.retrievers import BaseRetriever # Import BaseRetriever for type hinting
+from langchain_community.vectorstores import Chroma # Import Chroma to get its instance type
 
 chat_bp = Blueprint('chat_bp', __name__, template_folder='../templates', static_folder='../static')
 
@@ -33,7 +35,7 @@ _llm_instances_by_session_id: Dict[str, ChatOpenAI] = {}
 def initialize_chains_with_app(app_instance):
     """
     Initialise les chaînes LangChain avec l'instance de l'application Flask.
-    Cette fonction devrait être appelée une fois au démarrage de l'application.
+    Cette fonction devrait être appelée une once au démarrage de l'application.
     """
     global rag_strict_prompt, rag_fallback_prompt, code_analysis_prompt, general_llm_chain, general_llm_prompt_template
 
@@ -197,12 +199,13 @@ def chat():
         )
         temp_memory.chat_memory.add_messages(final_chat_history_for_llm)
 
-        kb_retriever = current_app.extensions["rag_service"]["kb_retriever"]
-        codebase_retriever = current_app.extensions["rag_service"]["codebase_retriever"]
+        # Retrieve ChromaDB instances directly
+        kb_db_instance: Chroma = current_app.extensions["rag_service"]["kb_db_instance"]
+        codebase_db_instance: Chroma = current_app.extensions["rag_service"]["codebase_db_instance"]
 
         use_rag_processing = False
         retrieved_docs: List[Document] = []
-        retriever_to_use: Optional[BaseRetriever] = None # Use BaseRetriever for type hinting
+        retriever_to_use: Optional[BaseRetriever] = None 
         filter_applied_log = "Aucun filtre de métadonnées." 
 
         selected_prompt: Optional[ChatPromptTemplate] = None
@@ -274,24 +277,19 @@ def chat():
             elif len(metadata_filters) > 1:
                 final_chromadb_filter = {"$and": metadata_filters}
             
-            # --- CORRECTION ICI : Configurer les search_kwargs directement sur le retriever ---
-            retriever_to_use = kb_retriever # Get the base retriever
-            # Create a new dictionary for search_kwargs to avoid modifying the original global retriever's settings
-            search_kwargs_for_this_query = kb_retriever.search_kwargs.copy() 
-            if final_chromadb_filter:
-                search_kwargs_for_this_query['filter'] = final_chromadb_filter
-            retriever_to_use.search_kwargs = search_kwargs_for_this_query # Assign the new search_kwargs
-
-            current_app.logger.info(f"DEBUG RAG: KB Retriever configuré avec filtres: {search_kwargs_for_this_query.get('filter')} (k={search_kwargs_for_this_query.get('k')})")
+            # --- CORRECTION ICI : Créer le retriever dynamiquement avec les search_kwargs ---
+            search_kwargs_kb = {"k": current_app.config['TOP_K_RETRIEVAL_KB'], "filter": final_chromadb_filter}
+            retriever_to_use = kb_db_instance.as_retriever(search_kwargs=search_kwargs_kb)
+            current_app.logger.info(f"DEBUG RAG: KB Retriever configuré avec filtres: {search_kwargs_kb.get('filter')} (k={search_kwargs_kb.get('k')})")
 
 
         elif rag_mode == 'code_rag':
             current_app.logger.info(f"DEBUG RAG: Question utilisateur: '{user_message}' (Mode: {rag_mode}, Projet: {selected_project}, Strict: {strict_mode}, Session: {session_key})")
             print(f"PRINT DEBUG RAG: Question utilisateur: '{user_message}' (Mode: {rag_mode}, Projet: {selected_project}, Strict: {strict_mode}, Session: {session_key})")
 
-            if not codebase_retriever:
+            if not codebase_db_instance:
                 response_content = "Désolé, le service d'indexation de codebase n'est pas disponible."
-                current_app.logger.warning("Codebase retriever non initialisé.")
+                current_app.logger.warning("Codebase DB instance non initialisée.")
                 return jsonify({'response': response_content})
 
             if selected_project:
@@ -301,13 +299,10 @@ def chat():
                 code_filters.append({"project_name": {"$eq": selected_project}})
                 filter_applied_log = f"Filtre Code: project_name={selected_project}, file_type=code"
 
-                # --- CORRECTION ICI : Configurer les search_kwargs directement sur le retriever ---
-                retriever_to_use = codebase_retriever # Get the base retriever
-                search_kwargs_for_this_query = codebase_retriever.search_kwargs.copy()
-                search_kwargs_for_this_query['filter'] = {"$and": code_filters}
-                retriever_to_use.search_kwargs = search_kwargs_for_this_query # Assign the new search_kwargs
-
-                current_app.logger.info(f"DEBUG RAG: Codebase Retriever configuré avec filtres: {search_kwargs_for_this_query.get('filter')} (k={search_kwargs_for_this_query.get('k')})")
+                # --- CORRECTION ICI : Créer le retriever dynamiquement avec les search_kwargs ---
+                search_kwargs_code = {"k": current_app.config['TOP_K_RETRIEVAL_CODEBASE'], "filter": {"$and": code_filters}}
+                retriever_to_use = codebase_db_instance.as_retriever(search_kwargs=search_kwargs_code)
+                current_app.logger.info(f"DEBUG RAG: Codebase Retriever configuré avec filtres: {search_kwargs_code.get('filter')} (k={search_kwargs_code.get('k')})")
 
             else:
                 response_content = "Veuillez sélectionner un projet pour le mode d'analyse de code."

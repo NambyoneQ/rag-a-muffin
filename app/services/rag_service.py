@@ -27,10 +27,8 @@ from app import db
 from app.models import DocumentStatus
 
 import openpyxl
-import pyexcel_ods # Assurez-vous que c'est importé ici
+import pyexcel_ods 
 
-# Liste des extensions de fichiers binaires ou non textuels à exclure explicitement de la lecture de contenu.
-# Cette liste est utilisée pour éviter les erreurs de décodage et les tentatives d'ingestion inappropriées.
 EXCLUDED_EXTENSIONS = {
     '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp', # Images
     '.mp3', '.wav', '.ogg', '.flac', '.aac', # Audio
@@ -59,19 +57,15 @@ class RAGService:
 
         self._any_db_reset = False 
 
-        # Initialise ou charge les vector stores et vérifie leur état
-        # _get_or_create_vector_store retourne l'instance Chroma et un booléen indiquant si elle était nouvelle ou vide
         self.db_kb, kb_was_reset_or_empty = self._get_or_create_vector_store(self.chroma_path_kb)
         self.db_codebase, codebase_was_reset_or_empty = self._get_or_create_vector_store(self.chroma_path_codebase)
         
-        # Si une des bases de données a été réinitialisée ou est vide, force le nettoyage du cache
-        # Cela garantit que si l'utilisateur supprime manuellement 'chroma_db', une réingestion complète aura lieu.
         if kb_was_reset_or_empty or codebase_was_reset_or_empty:
             self._any_db_reset = True
             print(f"Detected new/empty ChromaDB(s). Clearing processing cache at {self.processing_cache_path} to force full re-ingestion.")
             if os.path.exists(self.processing_cache_path):
                 shutil.rmtree(self.processing_cache_path)
-            os.makedirs(self.processing_cache_path, exist_ok=True) # S'assurer qu'il existe après la suppression
+            os.makedirs(self.processing_cache_path, exist_ok=True) 
 
 
     def _initialize_directories(self):
@@ -84,7 +78,6 @@ class RAGService:
         Retourne l'instance ChromaDB et un booléen (True si créée/vide, False si chargée avec des données existantes).
         """
         was_reset_or_empty = False
-        # Vérifie si le répertoire existe et est vide avant d'essayer de le charger comme existant
         if not os.path.exists(path) or not os.listdir(path):
             print(f"Creating new ChromaDB at {path}")
             was_reset_or_empty = True
@@ -92,7 +85,6 @@ class RAGService:
         else:
             print(f"Loading existing ChromaDB from {path}")
             chroma_db = Chroma(embedding_function=self.embeddings, persist_directory=path)
-            # Après le chargement, vérifie si elle est réellement vide de documents
             if len(chroma_db.get(include=[])['ids']) == 0:
                 print(f"Existing ChromaDB at {path} found to be empty. Treating as if newly created.")
                 was_reset_or_empty = True 
@@ -133,9 +125,8 @@ class RAGService:
                 file_path = os.path.normpath(os.path.join(root, file)) 
                 file_extension = os.path.splitext(file_path)[1].lower()
                 
-                # Exclusion précoce des fichiers binaires ou à ignorer pour éviter les erreurs de lecture
                 if file_extension in EXCLUDED_EXTENSIONS or file.startswith('~$'): 
-                    # print(f"Skipping file due to extension or temp status: {file_path}") # Uncomment for debug
+                    print(f"Skipping file due to extension or temp status: {file_path}") 
                     continue
                 
                 current_files_on_disk[file_path] = {'mtime': os.path.getmtime(file_path), 'size': os.path.getsize(file_path)}
@@ -147,7 +138,6 @@ class RAGService:
 
         file_extension = os.path.splitext(file_path)[1].lower() 
         
-        # Double vérification pour les fichiers exclus.
         if file_extension in EXCLUDED_EXTENSIONS:
             print(f"Skipping file due to excluded extension (redundant check in loader): {file_path}")
             return []
@@ -166,7 +156,6 @@ class RAGService:
                 loader = UnstructuredODTLoader(file_path)
                 docs = loader.load()
             elif file_extension == ".xlsx":
-                # Handle Excel files manually to extract text from all sheets, each as a separate Document
                 workbook = openpyxl.load_workbook(file_path, data_only=True)
                 docs_for_file = []
                 for sheet_name in workbook.sheetnames:
@@ -178,7 +167,6 @@ class RAGService:
                     
                     if sheet_rows_data:
                         sheet_content = f"Feuille: {sheet_name}\n" + "\n".join(sheet_rows_data)
-                        # Metadata for each sheet
                         metadata = {
                             "source": os.path.abspath(file_path), 
                             "file_type": "kb", 
@@ -188,7 +176,6 @@ class RAGService:
                         docs_for_file.append(Document(page_content=sheet_content, metadata=metadata))
                 return docs_for_file 
             elif file_extension == ".ods":
-                # Handle ODS files manually, each sheet as a separate Document
                 ods_data = pyexcel_ods.get_data(file_path) 
                 docs_for_file = [] 
                 for sheet_name, table_data in ods_data.items():
@@ -199,7 +186,6 @@ class RAGService:
                     
                     if sheet_rows_data:
                         sheet_content = f"Feuille: {sheet_name}\n" + "\n".join(sheet_rows_data)
-                        # Metadata for each sheet
                         metadata = {
                             "source": os.path.abspath(file_path), 
                             "file_type": "kb", 
@@ -224,9 +210,8 @@ class RAGService:
     def _process_documents(self, directory: str, file_type: str, db_instance: Chroma):
         """Generic processor for both KB and Codebase documents."""
         print(f"Processing {file_type.capitalize()} documents from {directory}...")
-        current_files_on_disk = self._get_current_files(directory) # Uses EXCLUDED_EXTENSIONS
+        current_files_on_disk = self._get_current_files(directory) 
         
-        # Fetch all DocumentStatus entries for this file_type from DB
         print(f"DEBUG DB: Fetching existing DocumentStatus entries for file_type='{file_type}'.")
         stored_db_status: Dict[str, DocumentStatus] = {
             os.path.normpath(ds.file_path): ds 
@@ -236,21 +221,18 @@ class RAGService:
 
 
         files_to_add_or_update_paths: set[str] = set()
-        files_to_delete_from_db_paths: set[str] = set(stored_db_status.keys()) # Start with all known paths from DB
+        files_to_delete_from_db_paths: set[str] = set(stored_db_status.keys()) 
 
-        # Statistics for summary
         num_new_files = 0
         num_modified_files = 0
         num_error_files = 0
         num_skipped_files = 0
         num_deleted_files = 0
         
-        # Initialize all_chunks_to_add_in_this_run to an empty list here
-        all_chunks_to_add_in_this_run: List[Document] = [] 
+        all_chunks_to_add_in_this_run: List[Document] = [] # Initialized here to ensure it's always bound
 
         # Phase 1: Identify files to ADD or UPDATE
         for file_path_on_disk in current_files_on_disk.keys(): 
-            # If the file still exists on disk, remove it from the 'to_delete' set
             if file_path_on_disk in files_to_delete_from_db_paths:
                 files_to_delete_from_db_paths.remove(file_path_on_disk) 
 
@@ -259,29 +241,24 @@ class RAGService:
             needs_processing = False
             doc_status_entry = stored_db_status.get(file_path_on_disk)
 
-            # Decision logic for 'needs_processing':
             if self._any_db_reset:
-                # Scenario 1: ChromaDB was just cleared (manual deletion of chroma_db folder).
-                # Force re-processing of ALL files to rebuild from scratch.
                 needs_processing = True
             elif doc_status_entry:
-                # Scenario 2: File is known in DocumentStatus DB. Check its stored hash and status.
-                assert doc_status_entry is not None # Pylance fix
+                assert doc_status_entry is not None 
                 if current_file_hash != doc_status_entry.file_hash:
                     needs_processing = True
                     num_modified_files += 1
                 elif doc_status_entry.status != 'indexed':
-                    # Re-process errored/skipped files (if their hash didn't change, but status isn't indexed)
                     needs_processing = True
-                    # No need to increment error/skipped count here, it will be handled in Phase 3 if it fails again
+                    if doc_status_entry.status == 'error': num_error_files += 1 
+                    elif doc_status_entry.status == 'skipped': num_skipped_files += 1
             else:
-                # Scenario 3: File is NOT known in DocumentStatus DB -> it's a new file.
                 needs_processing = True
                 num_new_files += 1
             
             if needs_processing:
                 files_to_add_or_update_paths.add(file_path_on_disk)
-                self._save_cached_hash(file_path_on_disk, current_file_hash) # Update cache for faster restarts
+                self._save_cached_hash(file_path_on_disk, current_file_hash) 
 
 
         # Phase 2: Delete documents no longer present on disk
@@ -289,13 +266,11 @@ class RAGService:
             print(f"Deleting removed {file_type.capitalize()} document from ChromaDB: {file_path_to_delete}")
             db_instance.delete(where={"source": file_path_to_delete}) 
 
-            # Delete from DocumentStatus table
             doc_status_entry = stored_db_status.get(file_path_to_delete)
             if doc_status_entry:
                 db.session.delete(doc_status_entry)
                 num_deleted_files += 1
             
-            # Remove hash from cache as well
             cache_file_name = hashlib.md5(file_path_to_delete.encode('utf-8')).hexdigest() + ".hash"
             cache_file = os.path.join(self.processing_cache_path, cache_file_name)
             if os.path.exists(cache_file):
@@ -304,8 +279,6 @@ class RAGService:
 
         # Phase 3: Load, chunk, and add/update documents in ChromaDB and DocumentStatus
         if files_to_add_or_update_paths:
-            # all_chunks_to_add_in_this_run: List[Document] = [] # Moved initialization outside for scope
-            
             for file_path_to_process in files_to_add_or_update_paths:
                 status_entry_for_file = stored_db_status.get(file_path_to_process) 
                 
@@ -332,7 +305,6 @@ class RAGService:
                     elif file_type == 'code':
                         file_extension = os.path.splitext(file_path_to_process)[1].lower()
                         if file_extension in EXCLUDED_EXTENSIONS:
-                            # This should ideally be caught by _get_current_files, but serves as a failsafe
                             print(f"Skipping codebase file {file_path_to_process} as it's detected as binary/unsupported type.")
                             raise ValueError("Binary file detected, cannot read as text.")
 
@@ -341,8 +313,6 @@ class RAGService:
                         chunks = self._split_code_into_chunks(code_content, file_path_to_process, self._detect_language(file_path_to_process))
                         all_chunks_to_add_in_this_run.extend(chunks)
 
-                    # Update DocumentStatus after successful processing
-                    # print(f"DEBUG DB: Preparing to add/update DocumentStatus for {file_path_to_process} (SUCCESS).") # Verbose
                     if status_entry_for_file:
                         status_entry_for_file.status = 'indexed'
                         status_entry_for_file.indexed_at = datetime.now()
@@ -372,9 +342,9 @@ class RAGService:
                        "file is not a zip file" in str(e).lower(): 
                         error_status = 'skipped'
                         error_message = "File is binary or malformed, skipped for text processing."
-                        num_skipped_files += 1 # Increment skipped count if it's a binary/malformed file
+                        num_skipped_files += 1 
                     else:
-                        num_error_files += 1 # Increment error count for other processing issues
+                        num_error_files += 1 
 
                     current_file_hash_on_error = self._calculate_file_hash(file_path_to_process) 
                     if status_entry_for_file:
@@ -396,25 +366,16 @@ class RAGService:
                         )
                         db.session.add(new_entry)
             
-            # Perform ChromaDB operations for this batch of files
-            if all_chunks_to_add_in_this_run: # Only if there are chunks to add
-                # print(f"Adding {len(all_chunks_to_add_in_this_run)} {file_type} chunks to ChromaDB.") # Verbose
+            if all_chunks_to_add_in_this_run:
                 sources_to_clear_in_chroma = {os.path.normpath(c.metadata['source']) for c in all_chunks_to_add_in_this_run}
                 for source_path in sources_to_clear_in_chroma:
                     db_instance.delete(where={"source": source_path})
-                    # print(f"  -> Cleared existing chunks for {source_path} in ChromaDB.") # Verbose
                 
                 db_instance.add_documents(all_chunks_to_add_in_this_run)
-                # print(f"Successfully added new/updated {file_type} chunks to ChromaDB.") # Verbose
-        # else: # No chunks to add for this batch of files, due to errors or empty content
-            # print(f"No {file_type} documents resulted in chunks to add after processing.") # Verbose
 
         # Summary of processing
         total_files_on_disk = len(current_files_on_disk)
         
-        # Recalculate actual counts from DB AFTER processing for accurate summary
-        # Note: These counts are for files *currently* in the DB, not just those modified in this run.
-        # They reflect the state AFTER db.session.add/delete operations (before the final commit).
         total_indexed_in_db = DocumentStatus.query.filter_by(file_type=file_type, status='indexed').count()
         total_errored_in_db = DocumentStatus.query.filter_by(file_type=file_type, status='error').count()
         total_skipped_in_db = DocumentStatus.query.filter_by(file_type=file_type, status='skipped').count()
@@ -430,7 +391,6 @@ class RAGService:
         if len(files_to_delete_from_db_paths) > 0:
             print(f"  - Files deleted from disk: {len(files_to_delete_from_db_paths)} (removed from ChromaDB & DocumentStatus)")
         
-        # This count now comes from the actual list of chunks accumulated
         print(f"  - Total chunks added/updated in ChromaDB this run: {len(all_chunks_to_add_in_this_run)}")
         
         print(f"Current DocumentStatus counts (after this run's operations, before final commit):")
@@ -440,7 +400,6 @@ class RAGService:
         print(f"--- End {file_type.capitalize()} Summary ---")
 
 
-    # These are now private helper methods used by _process_documents
     def _process_kb_documents(self):
         self._process_documents(self.kb_documents_path, 'kb', self.db_kb)
 
@@ -951,13 +910,11 @@ class RAGService:
         else:
             doc.metadata['document_title'] = doc.metadata['title'] 
 
-    def as_retriever_kb(self):
-        """Retourne le retriever pour la base de connaissances."""
-        return self.db_kb.as_retriever(search_kwargs={"k": Config.TOP_K_RETRIEVAL_KB, "filter": {"file_type": "kb"}})
+    def get_kb_db_instance(self) -> Chroma: # NEW: Return Chroma instance directly
+        return self.db_kb
 
-    def as_retriever_codebase(self):
-        """Retourne le retriever pour la codebase."""
-        return self.db_codebase.as_retriever(search_kwargs={"k": Config.TOP_K_RETRIEVAL_CODEBASE, "filter": {"file_type": "code"}})
+    def get_codebase_db_instance(self) -> Chroma: # NEW: Return Chroma instance directly
+        return self.db_codebase
 
 
 # This block is for direct testing of RAGService outside Flask app.
